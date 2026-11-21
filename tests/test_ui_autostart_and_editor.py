@@ -155,6 +155,16 @@ class TestUIAutostartAndEditor(unittest.TestCase):
             cols = [c.get(f"{{{W_NS}}}num") for c in doc_root.findall(".//w:cols", NS)]
             self.assertIn("2", cols)
 
+    def test_04_system_font_grouping_by_type(self):
+        from font_picker import classify_font_family, get_system_fonts_grouped
+        self.assertEqual(classify_font_family("Times New Roman", False), "serif")
+        self.assertEqual(classify_font_family("Cambria", False), "serif")
+        self.assertEqual(classify_font_family("Segoe UI", False), "sans")
+        self.assertEqual(classify_font_family("Consolas", True), "mono")
+        self.assertEqual(classify_font_family("Segoe Script", False), "display")
+        grouped = get_system_fonts_grouped()
+        self.assertGreater(len(grouped), 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

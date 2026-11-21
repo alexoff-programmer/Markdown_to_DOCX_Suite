@@ -84,12 +84,12 @@ try:
         QPushButton, QButtonGroup, QFrame, QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
         QFileDialog, QScrollArea, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
         QProgressBar, QStackedWidget, QAbstractItemView, QTextEdit, QPlainTextEdit, QSplitter,
-        QListWidget, QSizePolicy, QSpinBox, QDoubleSpinBox, QColorDialog, QSizeGrip
+        QListWidget, QListWidgetItem, QSizePolicy, QSpinBox, QDoubleSpinBox, QColorDialog, QSizeGrip
     )
     from template_editor_widget import TemplateEditorWidget
     from PySide6.QtGui import (
         QIcon, QPixmap, QPainter, QColor, QFont, QCursor, QAction,
-        QDragEnterEvent, QDropEvent
+        QDragEnterEvent, QDropEvent, QDrag
     )
     try:
         from PySide6.QtSvg import QSvgRenderer
@@ -99,7 +99,7 @@ try:
         HAS_QTSVG = False
     from PySide6.QtCore import (
         Qt, QObject, QAbstractNativeEventFilter, QPoint, QRect, Signal, Slot,
-        QThread, QTimer, QSize, QPropertyAnimation, QEasingCurve, QFileSystemWatcher
+        QThread, QTimer, QSize, QPropertyAnimation, QVariantAnimation, QEasingCurve, QFileSystemWatcher
     )
     HAS_PYSIDE6 = True
 except ImportError:
@@ -859,23 +859,41 @@ def build_stylesheet(theme_name: str = "light", ui_font: str = "Inter") -> str:
         color: {t['text_mute']};
         border-color: {t['border']};
     }}
-    QPushButton#PathPill {{
+    #PathPill {{
         background-color: {t['bg_window']};
         border: 1px solid {t['border_strong']};
         border-radius: 8px;
-        padding: 7px 12px;
+        padding: 6px 12px;
         color: {t['text_2']};
         font-size: 12.5px;
         text-align: left;
     }}
-    QPushButton#PathPill:hover {{
+    #PathPill:hover {{
         border-color: {t['accent']};
+    }}
+    #InputPill {{
+        background-color: {t['bg_window']};
+        border: 1px solid {t['border_strong']};
+        border-radius: 8px;
+        padding: 0px;
+        color: {t['text']};
+        font-size: 13px;
+        text-align: left;
+    }}
+    #InputPill:hover {{
+        border-color: {t['accent']};
+    }}
+    #TemplateEditor QSpinBox, #TemplateEditor QDoubleSpinBox {{
+        padding: 6px 26px 6px 0px;
+    }}
+    #TemplateEditor QLineEdit {{
+        padding: 6px 12px 6px 0px;
     }}
     QLineEdit, QComboBox {{
         background-color: {t['bg_window']};
         border: 1px solid {t['border_strong']};
         border-radius: 7px;
-        padding: 6px 10px;
+        padding: 6px 12px;
         color: {t['text']};
         font-size: 13px;
     }}
@@ -986,7 +1004,7 @@ def build_stylesheet(theme_name: str = "light", ui_font: str = "Inter") -> str:
         background-color: {t['bg_subtle']};
         border: 1px solid {t['border']};
         border-radius: 6px;
-        padding: 7px 10px;
+        padding: 6px 12px;
         margin-bottom: 4px;
     }}
     QListWidget::item:selected {{
@@ -1051,6 +1069,12 @@ def build_stylesheet(theme_name: str = "light", ui_font: str = "Inter") -> str:
         border-left: 1px solid {t['border_strong']};
         border-top-right-radius: 13px;
         border-bottom-right-radius: 13px;
+    }}
+    QFrame#DrawerHeader {{
+        background-color: {t['bg_subtle']};
+        border-bottom: 1px solid {t['border']};
+        border-top-left-radius: 0px;
+        border-top-right-radius: 13px;
     }}
     QFrame.TplCard {{
         background-color: {t['bg_window']};
@@ -1153,7 +1177,7 @@ def build_stylesheet(theme_name: str = "light", ui_font: str = "Inter") -> str:
         background-color: {t['bg_window']};
         border: 1px solid {t['border_strong']};
         border-radius: 7px;
-        padding: 5px 24px 5px 8px;
+        padding: 6px 26px 6px 8px;
         color: {t['text']};
         font-size: 13px;
         min-height: 22px;
@@ -1201,11 +1225,11 @@ def build_stylesheet(theme_name: str = "light", ui_font: str = "Inter") -> str:
         border-color: {t['accent']};
     }}
     QToolTip {{
-        background-color: {t['text']};
-        color: {t['bg_window']};
-        border: none;
-        border-radius: 6px;
-        padding: 5px 9px;
+        background-color: {t['bg_subtle']};
+        color: {t['text']};
+        border: 1px solid {t['border_strong']};
+        border-radius: 7px;
+        padding: 5px 10px;
         font-size: 12px;
     }}
     QPushButton.PrimaryBtn:pressed {{
@@ -1370,10 +1394,11 @@ if HAS_PYSIDE6:
         outer = QVBoxLayout(dlg)
         outer.setContentsMargins(12, 12, 12, 12)
         box = QFrame()
+        box.setObjectName("ThemedDlgBox")
         box.setAttribute(Qt.WA_StyledBackground, True)
         border_col = "#EF4444" if is_error else t["border_strong"]
         box.setStyleSheet(
-            f"QFrame {{ background-color: {t['bg_window']}; border: 1px solid {border_col}; border-radius: 14px; }}"
+            f"QFrame#ThemedDlgBox {{ background-color: {t['bg_window']}; border: 1px solid {border_col}; border-radius: 14px; }}"
         )
 
         outer.addWidget(box)
@@ -1494,6 +1519,130 @@ if HAS_PYSIDE6:
             if paths:
                 self.files_dropped.emit(paths)
 
+
+    class MergeListWidget(QListWidget):
+        """Список склейки с курсором руки только на элементах и кастомной анимацией перетаскивания."""
+        def __init__(self, theme_getter=None, parent=None):
+            super().__init__(parent)
+            self._theme_getter = theme_getter
+            self._drop_y = -1.0
+            self._target_drop_y = -1.0
+            self._drop_anim = QVariantAnimation(self)
+            self._drop_anim.setDuration(110)
+            self._drop_anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._drop_anim.valueChanged.connect(self._on_drop_y_anim)
+            self.setMouseTracking(True)
+            self.viewport().setMouseTracking(True)
+            self.setDropIndicatorShown(False)
+
+        def _on_drop_y_anim(self, val):
+            self._drop_y = float(val)
+            self.viewport().update()
+
+        def mouseMoveEvent(self, event):
+            it = self.itemAt(event.pos())
+            if it is not None:
+                self.viewport().setCursor(Qt.OpenHandCursor)
+            else:
+                self.viewport().unsetCursor()
+            super().mouseMoveEvent(event)
+
+        def leaveEvent(self, event):
+            self.viewport().unsetCursor()
+            super().leaveEvent(event)
+
+        def startDrag(self, supportedActions):
+            it = self.currentItem()
+            if it is None:
+                return super().startDrag(supportedActions)
+            drag = QDrag(self)
+            mime = self.model().mimeData(self.selectedIndexes())
+            drag.setMimeData(mime)
+
+            t = self._theme_getter() if self._theme_getter else THEMES["light"]
+            w = max(180, self.viewport().width() - 12)
+            h = 34
+            pix = QPixmap(w, h)
+            pix.fill(Qt.transparent)
+            p = QPainter(pix)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setBrush(QColor(t["bg_window"]))
+            pen = p.pen()
+            pen.setColor(QColor(t["accent"]))
+            pen.setWidthF(1.5)
+            p.setPen(pen)
+            p.drawRoundedRect(1, 1, w - 2, h - 2, 8, 8)
+            p.setPen(QColor(t["text"]))
+            f = self.font()
+            f.setPointSizeF(9.5)
+            p.setFont(f)
+            txt = p.fontMetrics().elidedText(it.text(), Qt.ElideMiddle, w - 24)
+            p.drawText(QRect(12, 0, w - 24, h), Qt.AlignVCenter | Qt.AlignLeft, txt)
+            p.end()
+
+            drag.setPixmap(pix)
+            drag.setHotSpot(QPoint(w // 2, h // 2))
+            drag.exec(supportedActions, Qt.MoveAction)
+
+        def dragMoveEvent(self, event):
+            super().dragMoveEvent(event)
+            pos = event.position().toPoint()
+            it = self.itemAt(pos)
+            if it is not None:
+                r = self.visualItemRect(it)
+                new_y = float(r.top() if pos.y() < r.center().y() else r.bottom())
+            elif self.count() > 0:
+                new_y = float(self.visualItemRect(self.item(self.count() - 1)).bottom())
+            else:
+                new_y = 6.0
+            if self._target_drop_y < 0:
+                self._target_drop_y = new_y
+                self._drop_y = new_y
+                self.viewport().update()
+            elif abs(new_y - self._target_drop_y) > 1.0:
+                self._target_drop_y = new_y
+                self._drop_anim.stop()
+                self._drop_anim.setStartValue(self._drop_y)
+                self._drop_anim.setEndValue(new_y)
+                self._drop_anim.start()
+
+        def dragLeaveEvent(self, event):
+            self._drop_anim.stop()
+            self._target_drop_y = -1.0
+            self._drop_y = -1.0
+            self.viewport().update()
+            super().dragLeaveEvent(event)
+
+        def dropEvent(self, event):
+            self._drop_anim.stop()
+            self._target_drop_y = -1.0
+            self._drop_y = -1.0
+            self.viewport().update()
+            super().dropEvent(event)
+
+        def paintEvent(self, event):
+            super().paintEvent(event)
+            if self._drop_y >= 0:
+                t = self._theme_getter() if self._theme_getter else THEMES["light"]
+                col = QColor(t["accent"])
+                glow = QColor(t["accent_soft"])
+                glow.setAlpha(150)
+                p = QPainter(self.viewport())
+                p.setRenderHint(QPainter.Antialiasing, True)
+                w = self.viewport().width()
+                y = int(round(self._drop_y))
+                p.setPen(Qt.NoPen)
+                p.setBrush(glow)
+                p.drawRoundedRect(8, y - 5, max(20, w - 16), 10, 5, 5)
+                pen = p.pen()
+                pen.setColor(col)
+                pen.setWidthF(2.5)
+                p.setPen(pen)
+                p.drawLine(12, y, w - 12, y)
+                p.setBrush(col)
+                p.drawEllipse(QPoint(12, y), 4, 4)
+                p.drawEllipse(QPoint(w - 12, y), 4, 4)
+                p.end()
 
     class ToastOverlay(QWidget):
         """Плавающее toast-уведомление с плавной анимацией windowOpacity."""
@@ -1911,8 +2060,24 @@ if HAS_PYSIDE6:
         def dragEnterEvent(self, event: QDragEnterEvent):
             if event.mimeData().hasUrls():
                 event.acceptProposedAction()
+                paths = [u.toLocalFile() for u in event.mimeData().urls() if u.toLocalFile()]
+                is_docx = any(Path(p).suffix.lower() == ".docx" for p in paths)
+                if hasattr(self, "drop_overlay"):
+                    if is_docx:
+                        self.lbl_drop_title.setText("Отпустите .docx для добавления в склейку" if not (self.mode == "text" and self.rb_append.isChecked()) else "Отпустите .docx как целевой файл Append")
+                    else:
+                        self.lbl_drop_title.setText("Отпустите .md, .txt, .html или папку для конвертации")
+                    self._layout_overlays()
+                    self.drop_overlay.setVisible(True)
+                    self.drop_overlay.raise_()
+
+        def dragLeaveEvent(self, event):
+            if hasattr(self, "drop_overlay"):
+                self.drop_overlay.setVisible(False)
 
         def dropEvent(self, event: QDropEvent):
+            if hasattr(self, "drop_overlay"):
+                self.drop_overlay.setVisible(False)
             paths = [u.toLocalFile() for u in event.mimeData().urls() if u.toLocalFile()]
             if not paths:
                 return
@@ -1953,11 +2118,22 @@ if HAS_PYSIDE6:
             self.config["ui_font"] = ui_f
             save_config(self.config)
             self._apply_theme()
+            self._toast(f"Шрифт интерфейса: {ui_f}")
 
         def _apply_theme(self):
             ui_f = self.config.get("ui_font", "Inter")
-            if QApplication.instance() is not None:
-                QApplication.instance().setFont(QFont(ui_f, 10))
+            qapp_inst = QApplication.instance()
+            t_tt = THEMES.get(self.theme_name, THEMES["light"])
+            if qapp_inst is not None:
+                qapp_inst.setFont(QFont(ui_f, 10))
+                pal = qapp_inst.palette()
+                pal.setColor(pal.ColorRole.ToolTipBase, QColor(t_tt["bg_subtle"]))
+                pal.setColor(pal.ColorRole.ToolTipText, QColor(t_tt["text"]))
+                qapp_inst.setPalette(pal)
+                qapp_inst.setStyleSheet(
+                    f"QToolTip {{ background-color: {t_tt['bg_subtle']}; color: {t_tt['text']}; "
+                    f"border: 1px solid {t_tt['border_strong']}; border-radius: 8px; padding: 6px 10px; font-size: 12px; }}"
+                )
             self.setStyleSheet(build_stylesheet(self.theme_name, ui_f))
             if hasattr(self, "btn_theme_light") and hasattr(self, "btn_theme_dark"):
                 self.btn_theme_light.setProperty("active", "true" if self.theme_name == "light" else "false")
@@ -2263,9 +2439,22 @@ if HAS_PYSIDE6:
             self.btn_main_run.setCursor(QCursor(Qt.PointingHandCursor))
             self.btn_main_run.clicked.connect(self._on_main_run)
             f_lay.addWidget(self.btn_main_run)
-            size_grip = QSizeGrip(self)
-            size_grip.setFixedSize(14, 14)
-            size_grip.setStyleSheet("background: transparent;")
+            class _CornerGrip(QSizeGrip):
+                def paintEvent(self, ev):
+                    p = QPainter(self)
+                    p.setRenderHint(QPainter.Antialiasing, True)
+                    pen_col = QColor(THEMES.get(self.window().theme_name, THEMES["light"])["text_mute"])
+                    pen_col.setAlpha(170)
+                    p.setPen(pen_col)
+                    w, h = self.width(), self.height()
+                    for off in (4, 8, 12):
+                        p.drawLine(w - off, h - 2, w - 2, h - off)
+                    p.end()
+
+            size_grip = _CornerGrip(self)
+            size_grip.setFixedSize(16, 16)
+            size_grip.setToolTip("Потяните, чтобы изменить размер окна")
+            size_grip.setCursor(QCursor(Qt.SizeFDiagCursor))
             f_lay.addWidget(size_grip, 0, Qt.AlignBottom | Qt.AlignRight)
             main_lay.addWidget(ftr)
 
@@ -2337,7 +2526,12 @@ if HAS_PYSIDE6:
             btn_pick.setProperty("class", "SecondaryBtn")
             btn_pick.clicked.connect(self._pick_append_target)
             ao_lay.addWidget(btn_pick)
+            self.append_opts_widget.setMaximumHeight(0)
             self.append_opts_widget.setVisible(False)
+            self._append_anim = QPropertyAnimation(self.append_opts_widget, b"maximumHeight", self)
+            self._append_anim.setDuration(170)
+            self._append_anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._append_anim.finished.connect(self._on_append_anim_finished)
             ctx_lay.addWidget(self.append_opts_widget)
             lay.addWidget(ctx)
 
@@ -2606,7 +2800,7 @@ if HAS_PYSIDE6:
             lbl1_s.setStyleSheet("font-size: 12.5px; opacity: 0.7;")
             l1.addWidget(lbl1_s)
 
-            self.list_merge = QListWidget()
+            self.list_merge = MergeListWidget(lambda: THEMES.get(self.theme_name, THEMES["light"]))
             self.list_merge.setMinimumWidth(0)
             self.list_merge.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
             self.list_merge.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -2718,6 +2912,30 @@ if HAS_PYSIDE6:
             return self.template_editor
 
         def _build_overlays(self, parent_widget: QWidget):
+            self.drop_overlay = QFrame(parent_widget)
+            self.drop_overlay.setAttribute(Qt.WA_StyledBackground, True)
+            self.drop_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self.drop_overlay.setVisible(False)
+            do_lay = QVBoxLayout(self.drop_overlay)
+            do_lay.setAlignment(Qt.AlignCenter)
+            do_card = QFrame()
+            do_card.setProperty("class", "DropHero")
+            do_card.setProperty("dragover", "true")
+            do_card.setAttribute(Qt.WA_StyledBackground, True)
+            dc_lay = QVBoxLayout(do_card)
+            dc_lay.setContentsMargins(32, 24, 32, 24)
+            dc_lay.setSpacing(6)
+            self.lbl_drop_title = QLabel("Отпустите файлы для добавления")
+            self.lbl_drop_title.setAlignment(Qt.AlignCenter)
+            self.lbl_drop_title.setStyleSheet("font-size: 15px; font-weight: 700; background: transparent; border: none;")
+            lbl_drop_sub = QLabel("Поддерживаются .md, .txt, .html, папки и .docx для склейки")
+            lbl_drop_sub.setAlignment(Qt.AlignCenter)
+            lbl_drop_sub.setStyleSheet("font-size: 12.5px; opacity: 0.78; background: transparent; border: none;")
+            dc_lay.addWidget(self.lbl_drop_title)
+            dc_lay.addWidget(lbl_drop_sub)
+            do_lay.addWidget(do_card)
+            self.drop_overlay.setStyleSheet("background-color: rgba(15, 23, 42, 0.28); border-radius: 13px;")
+
             self.backdrop = QFrame(parent_widget)
             self.backdrop.setStyleSheet("background-color: rgba(15, 23, 42, 0.32); border-radius: 13px;")
             self.backdrop.setVisible(False)
@@ -2798,7 +3016,8 @@ if HAS_PYSIDE6:
             d_lay.setSpacing(0)
 
             d_hdr = QFrame()
-            d_hdr.setProperty("class", "PaneHeader")
+            d_hdr.setObjectName("DrawerHeader")
+            d_hdr.setAttribute(Qt.WA_StyledBackground, True)
             dh_lay = QHBoxLayout(d_hdr)
             dh_lay.setContentsMargins(16, 12, 16, 12)
             lbl_dh = QLabel("Параметры приложения")
@@ -2904,25 +3123,38 @@ if HAS_PYSIDE6:
                 return
             rw = self.window_frame.width()
             rh = self.window_frame.height()
-            self.backdrop.setGeometry(0, 0, rw, rh)
+            self.backdrop.setGeometry(1, 1, max(0, rw - 2), max(0, rh - 2))
+            if hasattr(self, "drop_overlay"):
+                self.drop_overlay.setGeometry(1, 1, max(0, rw - 2), max(0, rh - 2))
             pw = min(440, max(320, rw - 36))
             ph = min(460, max(280, rh - 100))
             self.tpl_popover.setGeometry(rw - pw - 18, 60, pw, ph)
             if self.settings_drawer.isVisible():
                 dw = min(360, rw)
-                self.settings_drawer.setGeometry(rw - dw, 0, dw, rh)
+                self.settings_drawer.setGeometry(rw - dw - 1, 1, dw, max(0, rh - 2))
 
         def _close_overlays(self):
             self.backdrop.setVisible(False)
             if self.tpl_popover.isVisible():
-                self.tpl_popover.setVisible(False)
+                cur_g = self.tpl_popover.geometry()
+                self._pop_anim.stop()
+                self._pop_anim.setStartValue(cur_g)
+                self._pop_anim.setEndValue(QRect(cur_g.x(), cur_g.y() - 8, cur_g.width(), 0))
+                def _hide_pop():
+                    self.tpl_popover.setVisible(False)
+                    try:
+                        self._pop_anim.finished.disconnect(_hide_pop)
+                    except Exception:
+                        pass
+                self._pop_anim.finished.connect(_hide_pop)
+                self._pop_anim.start()
             if self.settings_drawer.isVisible():
                 rw = self.window_frame.width()
                 rh = self.window_frame.height()
                 dw = self.settings_drawer.width()
                 self._drawer_anim.stop()
                 self._drawer_anim.setStartValue(self.settings_drawer.geometry())
-                self._drawer_anim.setEndValue(QRect(rw, 0, dw, rh))
+                self._drawer_anim.setEndValue(QRect(rw - 1, 1, dw, max(0, rh - 2)))
                 def _hide_dr():
                     self.settings_drawer.setVisible(False)
                     try:
@@ -2963,12 +3195,12 @@ if HAS_PYSIDE6:
             dw = min(360, rw)
             self.backdrop.setVisible(True)
             self.backdrop.raise_()
-            self.settings_drawer.setGeometry(rw, 0, dw, rh)
+            self.settings_drawer.setGeometry(rw - 1, 1, dw, max(0, rh - 2))
             self.settings_drawer.setVisible(True)
             self.settings_drawer.raise_()
             self._drawer_anim.stop()
-            self._drawer_anim.setStartValue(QRect(rw, 0, dw, rh))
-            self._drawer_anim.setEndValue(QRect(rw - dw, 0, dw, rh))
+            self._drawer_anim.setStartValue(QRect(rw - 1, 1, dw, max(0, rh - 2)))
+            self._drawer_anim.setEndValue(QRect(rw - dw - 1, 1, dw, max(0, rh - 2)))
             self._drawer_anim.start()
 
         def _render_tpl_cards(self):
@@ -3133,9 +3365,25 @@ if HAS_PYSIDE6:
             self._toast(f"Импортировано шаблонов: {cnt}" if cnt else "Ошибка: некорректный JSON шаблона")
 
         def _switch_mode(self, mode_id: str):
-            self.mode = mode_id
             idx_map = {"text": 0, "files": 1, "merge": 2, "templates": 3}
-            self.stack.setCurrentIndex(idx_map.get(mode_id, 0))
+            old_idx = self.stack.currentIndex()
+            new_idx = idx_map.get(mode_id, 0)
+            self.mode = mode_id
+            self.stack.setCurrentIndex(new_idx)
+            w_cur = self.stack.currentWidget()
+            if w_cur is not None and old_idx != new_idx and self.isVisible():
+                dx = 16 if new_idx > old_idx else -16
+                end_pos = w_cur.pos()
+                start_pos = QPoint(end_pos.x() + dx, end_pos.y())
+                if not hasattr(self, "_tab_anim"):
+                    self._tab_anim = QPropertyAnimation(w_cur, b"pos", self)
+                    self._tab_anim.setDuration(150)
+                    self._tab_anim.setEasingCurve(QEasingCurve.OutCubic)
+                self._tab_anim.stop()
+                self._tab_anim.setTargetObject(w_cur)
+                self._tab_anim.setStartValue(start_pos)
+                self._tab_anim.setEndValue(end_pos)
+                self._tab_anim.start()
             for k, btn in self.seg_buttons.items():
                 btn.setProperty("active", "true" if k == mode_id else "false")
                 btn.style().unpolish(btn)
@@ -3148,9 +3396,21 @@ if HAS_PYSIDE6:
                 self._ensure_template_editor().load_templates(self.active_tpl)
             self._update_footer_button()
 
+        def _on_append_anim_finished(self):
+            if self.append_opts_widget.maximumHeight() == 0:
+                self.append_opts_widget.setVisible(False)
+
         def _on_append_radio_changed(self):
             is_app = self.rb_append.isChecked()
-            self.append_opts_widget.setVisible(is_app)
+            self._append_anim.stop()
+            if is_app:
+                self.append_opts_widget.setVisible(True)
+                self._append_anim.setStartValue(self.append_opts_widget.maximumHeight())
+                self._append_anim.setEndValue(42)
+            else:
+                self._append_anim.setStartValue(self.append_opts_widget.height())
+                self._append_anim.setEndValue(0)
+            self._append_anim.start()
             self._update_footer_button()
 
         def _update_footer_button(self):
@@ -3770,12 +4030,12 @@ if HAS_PYSIDE6:
         def _sync_merge_list_ui(self):
             self.list_merge.clear()
             for i, fp in enumerate(self.merge_files, 1):
-                it = QListWidgetItem(f"{i}. {Path(fp).name}")
+                it = QListWidgetItem(f"⋮⋮   {Path(fp).name}")
                 it.setData(Qt.UserRole, fp)
                 it.setToolTip(fp)
                 self.list_merge.addItem(it)
 
-        def _on_merge_rows_moved(self, *args):
+        def _on_merge_rows_moved(self, parent, start, end, dest, row):
             reordered = []
             for r in range(self.list_merge.count()):
                 fp = self.list_merge.item(r).data(Qt.UserRole)
@@ -3783,8 +4043,30 @@ if HAS_PYSIDE6:
                     reordered.append(fp)
             if reordered:
                 self.merge_files = reordered
-                QTimer.singleShot(0, self._sync_merge_list_ui)
+                target_idx = row - 1 if row > start else row
+                QTimer.singleShot(0, lambda idx=target_idx: self._animate_merge_swap(idx))
                 self._toast("Порядок документов обновлён")
+
+        def _animate_merge_swap(self, idx: int):
+            self._sync_merge_list_ui()
+            if 0 <= idx < self.list_merge.count():
+                item = self.list_merge.item(idx)
+                self.list_merge.setCurrentRow(idx)
+                t = THEMES.get(self.theme_name, THEMES["light"])
+                base_col = QColor(t["accent_soft"])
+                anim = QVariantAnimation(self.list_merge)
+                anim.setDuration(380)
+                anim.setStartValue(220)
+                anim.setEndValue(0)
+                anim.setEasingCurve(QEasingCurve.OutCubic)
+                def _step(val, it=item, c=base_col):
+                    if self.list_merge.row(it) >= 0:
+                        cc = QColor(c)
+                        cc.setAlpha(int(val))
+                        it.setBackground(cc)
+                anim.valueChanged.connect(_step)
+                anim.finished.connect(anim.deleteLater)
+                anim.start()
 
         def _on_merge_context_menu(self, pos):
             menu = QMenu(self.list_merge)
@@ -3815,18 +4097,13 @@ if HAS_PYSIDE6:
             nr = r + delta
             if 0 <= nr < len(self.merge_files):
                 self.merge_files[r], self.merge_files[nr] = self.merge_files[nr], self.merge_files[r]
-                self.list_merge.clear()
-                for i, fp in enumerate(self.merge_files, 1):
-                    self.list_merge.addItem(f"{i}. {Path(fp).name}")
-                self.list_merge.setCurrentRow(nr)
+                self._animate_merge_swap(nr)
 
         def _merge_remove(self):
             r = self.list_merge.currentRow()
-            if r >= 0:
+            if 0 <= r < len(self.merge_files):
                 self.merge_files.pop(r)
-                self.list_merge.clear()
-                for i, fp in enumerate(self.merge_files, 1):
-                    self.list_merge.addItem(f"{i}. {Path(fp).name}")
+                self._sync_merge_list_ui()
 
         def _merge_clear(self):
             self.merge_files.clear()

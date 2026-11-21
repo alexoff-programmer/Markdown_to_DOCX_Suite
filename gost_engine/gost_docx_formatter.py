@@ -1436,7 +1436,7 @@ class GostDocxFormatter:
                 self.style_obj_map[s_def['ui_name'].lower()] = style
 
             f_key = s_def.get('font', 'primary')
-            f_data = font_specs.get(f_key, font_specs.get('primary', {'name': 'Times New Roman'}))
+            f_data = font_specs.get(f_key) or ({'name': f_key, 'ascii': f_key, 'hAnsi': f_key, 'cs': f_key, 'eastAsia': f_key} if f_key not in ('primary', 'monospace') else font_specs.get('primary', {'name': 'Times New Roman'}))
             style.font.name = f_data['name']
             style.font.size = Pt(s_def.get('size_pt', 14.0))
             style.font.bold = s_def.get('bold', False)
@@ -1740,7 +1740,7 @@ class GostDocxFormatter:
         body_cfg = self._get_style_cfg('GOST_Body')
         font_specs = self.cfg.get('fonts', {})
         f_key = body_cfg.get('font', 'primary')
-        f_data = font_specs.get(f_key, font_specs.get('primary', {'name': 'Times New Roman'}))
+        f_data = font_specs.get(f_key) or ({'name': f_key, 'ascii': f_key, 'hAnsi': f_key, 'cs': f_key, 'eastAsia': f_key} if f_key not in ('primary', 'monospace') else font_specs.get('primary', {'name': 'Times New Roman'}))
 
         try:
             lp_style = self.doc.styles['List Paragraph']
@@ -1753,7 +1753,9 @@ class GostDocxFormatter:
             pPr.line_spacing = body_cfg.get('line_spacing', 1.5)
             pPr.space_before = Pt(0.0)
             pPr.space_after = Pt(0.0)
+            pPr.left_indent = Mm(0.0)
             pPr.first_line_indent = Mm(0.0)
+            pPr.contextual_spacing = False
 
         self._list_style_obj = lp_style
         self._list_style_ready = True
@@ -1788,11 +1790,14 @@ class GostDocxFormatter:
 
         body_cfg = self._get_style_cfg('GOST_Body')
         font_specs = self.cfg.get('fonts', {})
-        f_data = font_specs.get(body_cfg.get('font', 'primary'), font_specs.get('primary', {'name': 'Times New Roman'}))
-        f_name = escape(f_data.get('name', 'Times New Roman'))
+        f_key = body_cfg.get('font', 'primary')
+        f_data = font_specs.get(f_key) or ({'name': f_key} if f_key not in ('primary', 'monospace') else font_specs.get('primary', {'name': 'Times New Roman'}))
+        f_name = escape(str(f_data.get('name', 'Times New Roman')))
 
         dash_sym = str(lists_cfg.get('dash_symbol', '–'))
         b_syms = lists_cfg.get('bullet_symbols', ['•', '◦', '▪']) or ['•']
+        m_sep = lists_cfg.get('marker_separator', '\u00a0')
+        suff_val = 'tab' if m_sep == '\t' else ('nothing' if m_sep == '' else 'space')
 
         lvls_xml = []
         for lvl in range(6):
@@ -1831,13 +1836,15 @@ class GostDocxFormatter:
 
             left_dxa = int(round((base_indent + lvl * level_step + hang) * DXA_PER_MM))
             hang_dxa = int(round(hang * DXA_PER_MM))
+            tabs_xml = f'<w:tabs><w:tab w:val="num" w:pos="{left_dxa}"/></w:tabs>' if suff_val == 'tab' else ''
             lvls_xml.append(
                 f'<w:lvl w:ilvl="{lvl}">'
                 f'<w:start w:val="1"/>'
                 f'<w:numFmt w:val="{num_fmt}"/>'
                 f'<w:lvlText w:val="{lvl_text}"/>'
+                f'<w:suff w:val="{suff_val}"/>'
                 f'<w:lvlJc w:val="left"/>'
-                f'<w:pPr><w:ind w:left="{left_dxa}" w:hanging="{hang_dxa}"/></w:pPr>'
+                f'<w:pPr>{tabs_xml}<w:ind w:left="{left_dxa}" w:hanging="{hang_dxa}"/></w:pPr>'
                 f'<w:rPr><w:rFonts w:ascii="{f_name}" w:hAnsi="{f_name}" w:cs="{f_name}" w:hint="default"/></w:rPr>'
                 f'</w:lvl>'
             )
@@ -1905,11 +1912,12 @@ class GostDocxFormatter:
             self._active_list_nums = {}
 
         prev_was_list = getattr(self, '_prev_node_was_list', False)
-        list_key = (effective_kind, is_latin_alpha, level)
-        if (not prev_was_list) or (list_key not in self._active_list_nums) or (list_kind in ('ordered_dot', 'ordered_paren') and start_val == 1 and getattr(self, '_last_list_key', None) != list_key):
-            for k_old in list(self._active_list_nums.keys()):
-                if k_old[2] >= level:
-                    del self._active_list_nums[k_old]
+        if not prev_was_list:
+            self._active_list_nums.clear()
+        list_key = (effective_kind, is_latin_alpha)
+        last_level = getattr(self, '_last_list_level', -1)
+        restart_sub = (level > last_level and list_kind in ('ordered_dot', 'ordered_paren', 'alpha_paren') and start_val == 1 and list_key in self._active_list_nums)
+        if (list_key not in self._active_list_nums) or restart_sub:
             abs_id = self._get_or_create_abstract_num(effective_kind, is_latin_alpha=is_latin_alpha)
             num_id = self._create_num_instance(abs_id, level=level, start_val=start_val)
             self._active_list_nums[list_key] = num_id
@@ -1917,10 +1925,13 @@ class GostDocxFormatter:
             num_id = self._active_list_nums[list_key]
 
         self._last_list_key = list_key
+        self._last_list_level = level
         self._prev_node_was_list = True
 
         for old_np in pPr.findall(qn('w:numPr')):
             pPr.remove(old_np)
+        for old_ind in pPr.findall(qn('w:ind')):
+            pPr.remove(old_ind)
         pPr.append(parse_xml(
             f'<w:numPr {nsdecls("w")}>'
             f'<w:ilvl w:val="{level}"/>'
@@ -2389,6 +2400,130 @@ def update_docx_styles(
                     sec._sectPr.append(cols_el)
                 cols_el.set(qn('w:num'), str(cols_n))
                 cols_el.set(qn('w:space'), str(int(round(col_sp_mm * 56.692913))))
+
+    if isinstance(style_updates, dict) and isinstance(style_updates.get('lists'), dict):
+        lists_cfg = style_updates['lists']
+        body_def = styles_map.get('Основной текст') or styles_map.get('Обычный') or styles_map.get('GOST_Body') or {}
+        base_indent = float(lists_cfg.get('base_indent_mm', body_def.get('first_line_indent_mm', 12.5)))
+        level_step = float(lists_cfg.get('level_step_mm', 6.0))
+        hang_cfg = lists_cfg.get('hanging_indent_mm', {})
+
+        def _u_hang(k_name: str, default_v: float) -> float:
+            if isinstance(hang_cfg, (int, float)):
+                return float(hang_cfg)
+            if isinstance(hang_cfg, dict) and k_name in hang_cfg:
+                return float(hang_cfg[k_name])
+            return default_v
+
+        dash_sym = str(lists_cfg.get('dash_symbol', '–'))
+        b_syms = lists_cfg.get('bullet_symbols', ['•', '◦', '▪']) or ['•']
+        m_sep = lists_cfg.get('marker_separator', '\u00a0')
+        suff_val = 'tab' if m_sep == '\t' else ('nothing' if m_sep == '' else 'space')
+
+        f_key = body_def.get('font', 'primary')
+        f_data = font_specs.get(f_key) or ({'name': f_key} if f_key not in ('primary', 'monospace') else font_specs.get('primary', {'name': 'Times New Roman'}))
+        f_name = str(f_data.get('name', 'Times New Roman'))
+
+        # Сбрасываем встроенный отступ у List Paragraph, чтобы multilevel numbering.xml управлял отступами
+        for lp_cand in ('List Paragraph', 'List Bullet', 'List Number'):
+            if lp_cand in existing_map:
+                lp_st = existing_map[lp_cand]
+                lp_st.paragraph_format.left_indent = Mm(0.0)
+                lp_st.paragraph_format.first_line_indent = Mm(0.0)
+                lp_st.paragraph_format.contextual_spacing = False
+
+        try:
+            num_part = doc.part.numbering_part
+        except Exception:
+            num_part = None
+        if num_part is not None:
+            num_el = num_part.numbering_definitions._numbering
+            for abs_el in num_el.findall(qn('w:abstractNum')):
+                ml_el = abs_el.find(qn('w:multiLevelType'))
+                if ml_el is None:
+                    ml_el = OxmlElement('w:multiLevelType')
+                    abs_el.insert(0, ml_el)
+                ml_el.set(qn('w:val'), 'multilevel')
+                for lvl_el in abs_el.findall(qn('w:lvl')):
+                    ilvl_str = lvl_el.get(qn('w:ilvl')) or '0'
+                    lvl_idx = int(ilvl_str) if ilvl_str.isdigit() else 0
+                    nf_el = lvl_el.find(qn('w:numFmt'))
+                    num_fmt = nf_el.get(qn('w:val')) if nf_el is not None else 'bullet'
+                    lt_el = lvl_el.find(qn('w:lvlText'))
+                    lt_val = lt_el.get(qn('w:lvlText')) if lt_el is not None else ''
+                    if num_fmt == 'bullet':
+                        if lt_val in ('☑', '☐'):
+                            hang = _u_hang('task', 5.5)
+                        elif lt_val in ('–', '-', '—', dash_sym):
+                            hang = _u_hang('dash', 4.5)
+                            if lt_el is not None:
+                                lt_el.set(qn('w:val'), dash_sym)
+                        else:
+                            hang = _u_hang('bullet', 4.5)
+                            if lt_el is not None:
+                                lt_el.set(qn('w:val'), str(b_syms[lvl_idx % len(b_syms)]))
+                    else:
+                        hang = _u_hang('ordered', 6.5)
+
+                    left_dxa = int(round((base_indent + lvl_idx * level_step + hang) * DXA_PER_MM))
+                    hang_dxa = int(round(hang * DXA_PER_MM))
+
+                    suff_el = lvl_el.find(qn('w:suff'))
+                    if suff_el is None:
+                        suff_el = OxmlElement('w:suff')
+                        lvl_el.append(suff_el)
+                    suff_el.set(qn('w:val'), suff_val)
+
+                    lpPr = lvl_el.find(qn('w:pPr'))
+                    if lpPr is None:
+                        lpPr = OxmlElement('w:pPr')
+                        lvl_el.append(lpPr)
+                    for old_tabs in lpPr.findall(qn('w:tabs')):
+                        lpPr.remove(old_tabs)
+                    if suff_val == 'tab':
+                        lpPr.append(parse_xml(f'<w:tabs {nsdecls("w")}><w:tab w:val="num" w:pos="{left_dxa}"/></w:tabs>'))
+                    ind_el = lpPr.find(qn('w:ind'))
+                    if ind_el is None:
+                        ind_el = OxmlElement('w:ind')
+                        lpPr.append(ind_el)
+                    ind_el.set(qn('w:left'), str(left_dxa))
+                    ind_el.set(qn('w:hanging'), str(hang_dxa))
+
+                    lrPr = lvl_el.find(qn('w:rPr'))
+                    if lrPr is None:
+                        lrPr = OxmlElement('w:rPr')
+                        lvl_el.append(lrPr)
+                    rf_el = lrPr.find(qn('w:rFonts'))
+                    if rf_el is None:
+                        rf_el = OxmlElement('w:rFonts')
+                        lrPr.append(rf_el)
+                    for attr in ('w:ascii', 'w:hAnsi', 'w:cs'):
+                        rf_el.set(qn(attr), f_name)
+
+        align_lut = {
+            'left': WD_ALIGN_PARAGRAPH.LEFT,
+            'center': WD_ALIGN_PARAGRAPH.CENTER,
+            'right': WD_ALIGN_PARAGRAPH.RIGHT,
+            'justify': WD_ALIGN_PARAGRAPH.JUSTIFY,
+        }
+        for p_obj in doc.paragraphs:
+            pPr_obj = p_obj._p.pPr
+            has_num = (pPr_obj is not None and pPr_obj.find(qn('w:numPr')) is not None)
+            st_n = p_obj.style.name if p_obj.style else ''
+            if has_num or st_n in ('List Paragraph', 'List Bullet', 'List Number'):
+                if pPr_obj is not None:
+                    for old_ind in pPr_obj.findall(qn('w:ind')):
+                        pPr_obj.remove(old_ind)
+                if lists_cfg.get('space_before_pt') is not None:
+                    p_obj.paragraph_format.space_before = Pt(float(lists_cfg['space_before_pt']))
+                if lists_cfg.get('space_after_pt') is not None:
+                    p_obj.paragraph_format.space_after = Pt(float(lists_cfg['space_after_pt']))
+                if lists_cfg.get('line_spacing') is not None:
+                    p_obj.paragraph_format.line_spacing = float(lists_cfg['line_spacing'])
+                if lists_cfg.get('alignment') in align_lut:
+                    p_obj.alignment = align_lut[lists_cfg['alignment']]
+                if lists_cfg.get('keep_together'):
+                    p_obj.paragraph_format.keep_together = True
 
     out_p = Path(output_path or existing_docx_path).resolve()
     out_p.parent.mkdir(parents=True, exist_ok=True)

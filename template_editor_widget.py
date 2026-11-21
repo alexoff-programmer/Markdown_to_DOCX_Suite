@@ -32,11 +32,36 @@ try:
     except ImportError:
         QSvgRenderer = None
         _HAS_SVG = False
-    from PySide6.QtCore import Qt, Signal
+    from PySide6.QtCore import Qt, Signal, QSize
+    from font_picker import FontPickerButton
     HAS_PYSIDE6 = True
 except ImportError:
     HAS_PYSIDE6 = False
 
+
+STYLE_DISPLAY_NAMES = {
+    "GOST_Heading_Structural": "Заголовок структурный",
+    "GOST_Heading_1": "Заголовок 1",
+    "GOST_Heading_2": "Заголовок 2",
+    "GOST_Heading_3": "Заголовок 3",
+    "GOST_Body": "Основной текст",
+    "GOST_Note": "Примечание",
+    "GOST_Quote": "Цитата",
+    "GOST_Epigraph": "Эпиграф",
+    "GOST_Table_Caption": "Название таблицы",
+    "GOST_Table_Cell": "Ячейка таблицы",
+    "GOST_Figure": "Рисунок",
+    "GOST_Figure_Caption": "Подпись рисунка",
+    "GOST_Listing_Code": "Исходный код",
+    "GOST_Listing_Caption": "Название листинга",
+    "Title": "Заголовок структурный",
+    "Heading 1": "Заголовок 1",
+    "Heading 2": "Заголовок 2",
+    "Heading 3": "Заголовок 3",
+    "Normal": "Основной текст",
+    "Caption": "Подпись рисунка",
+    "Quote": "Цитата",
+}
 
 CANONICAL_STYLE_ORDER = [
     "Заголовок структурный",
@@ -233,6 +258,86 @@ def strip_internal_keys(cfg: dict) -> dict:
 
 if HAS_PYSIDE6:
 
+    class StyledMenuSelect(QPushButton):
+        """Кастомный выпадающий выбор в стиле приложения со скруглённым тематическим QMenu."""
+        currentIndexChanged = Signal(int)
+
+        def __init__(self, theme_getter=None, parent=None):
+            super().__init__("", parent)
+            self._theme_getter = theme_getter
+            self._items: List[tuple] = []
+            self._cur_idx: int = -1
+            self.setObjectName("InputPill")
+            self.setFixedHeight(34)
+            self.setCursor(QCursor(Qt.PointingHandCursor))
+            _slay = QHBoxLayout(self)
+            _slay.setContentsMargins(0, 0, 10, 0)
+            _slay.setSpacing(6)
+            self._lbl_text = QLabel("")
+            self._lbl_text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            self._lbl_text.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._lbl_text.setStyleSheet("background: transparent; border: none; font-size: 13px;")
+            self._lbl_arr = QLabel("▾")
+            self._lbl_arr.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self._lbl_arr.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._lbl_arr.setStyleSheet("background: transparent; border: none; font-size: 12px;")
+            _slay.addWidget(self._lbl_text, 1)
+            _slay.addWidget(self._lbl_arr, 0)
+            self._menu = QMenu(self)
+            self._menu.setWindowFlags(self._menu.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+            self._menu.setAttribute(Qt.WA_TranslucentBackground, True)
+            self.setMenu(self._menu)
+            self.apply_theme()
+
+        def apply_theme(self):
+            t = self._theme_getter() if self._theme_getter else {
+                "bg_window": "#FFFFFF", "border_strong": "#CBD5E1",
+                "text": "#0F172A", "accent_soft": "#EFF6FF", "accent_text": "#1E40AF",
+            }
+            self._menu.setStyleSheet(
+                f"QMenu {{ background-color: {t['bg_window']}; border: 1px solid {t['border_strong']}; "
+                f"border-radius: 10px; padding: 6px; color: {t['text']}; }}"
+                f"QMenu::item {{ padding: 7px 14px; border-radius: 6px; font-size: 13px; color: {t['text']}; }}"
+                f"QMenu::item:selected {{ background-color: {t['accent_soft']}; color: {t['accent_text']}; }}"
+            )
+
+        def addItem(self, text: str, data=None):
+            idx = len(self._items)
+            self._items.append((text, data))
+            act = self._menu.addAction(text)
+            act.setCheckable(True)
+            act.triggered.connect(lambda _, i=idx: self._pick(i))
+            if self._cur_idx < 0:
+                self.setCurrentIndex(0)
+
+        def findData(self, data) -> int:
+            for i, (_, d) in enumerate(self._items):
+                if d == data:
+                    return i
+            return -1
+
+        def currentData(self):
+            if 0 <= self._cur_idx < len(self._items):
+                return self._items[self._cur_idx][1]
+            return None
+
+        def setCurrentIndex(self, idx: int):
+            if not (0 <= idx < len(self._items)):
+                return
+            self._cur_idx = idx
+            txt = self._items[idx][0]
+            max_px = self.maximumWidth() if self.maximumWidth() < 10000 else 260
+            elided = self._lbl_text.fontMetrics().elidedText(txt, Qt.ElideRight, max(70, max_px - 36))
+            self._lbl_text.setText(elided)
+            self.setToolTip(txt)
+            for i, act in enumerate(self._menu.actions()):
+                act.setChecked(i == idx)
+
+        def _pick(self, idx: int):
+            if idx != self._cur_idx:
+                self.setCurrentIndex(idx)
+                self.currentIndexChanged.emit(idx)
+
     class TemplateEditorWidget(QWidget):
         """Полноценный редактор шаблонов, органично встроенный в UnifiedMainWindow."""
         template_saved = Signal(str)
@@ -264,6 +369,7 @@ if HAS_PYSIDE6:
             self._loading: bool = False
             self._dirty: bool = False
 
+            self.setObjectName("TemplateEditor")
             self._build_ui()
 
         def _t(self) -> dict:
@@ -358,7 +464,7 @@ if HAS_PYSIDE6:
             nav_card = QFrame()
             nav_card.setProperty("class", "PaneCard")
             nav_card.setAttribute(Qt.WA_StyledBackground, True)
-            nav_card.setFixedWidth(218)
+            nav_card.setFixedWidth(205)
             n_lay = QVBoxLayout(nav_card)
             n_lay.setContentsMargins(10, 12, 10, 12)
             n_lay.setSpacing(6)
@@ -432,7 +538,7 @@ if HAS_PYSIDE6:
         def _build_page_section(self) -> QWidget:
             w = QWidget()
             lay = QVBoxLayout(w)
-            lay.setContentsMargins(18, 16, 18, 16)
+            lay.setContentsMargins(20, 18, 20, 18)
             lay.setSpacing(12)
 
             lbl = QLabel("Параметры страницы, колонок и метаданные")
@@ -475,6 +581,11 @@ if HAS_PYSIDE6:
             g.addWidget(self.sp_mb, 4, 3)
 
             self.sp_cols = QSpinBox()
+            self.sp_cols.setFixedHeight(34)
+            self.sp_cols.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            if self.sp_cols.lineEdit() is not None:
+                self.sp_cols.lineEdit().setStyleSheet("padding: 0px; margin: 0px; background: transparent; border: none;")
+                self.sp_cols.lineEdit().setTextMargins(0, 0, 0, 0)
             self.sp_cols.setRange(1, 3)
             self.sp_cols.valueChanged.connect(self._on_page_changed)
             self.sp_col_gap = self._make_dspin(1.0, 30.0, 0.5, 5.0, " мм")
@@ -502,7 +613,7 @@ if HAS_PYSIDE6:
         def _build_fonts_section(self) -> QWidget:
             w = QWidget()
             lay = QVBoxLayout(w)
-            lay.setContentsMargins(18, 16, 18, 16)
+            lay.setContentsMargins(20, 18, 20, 18)
             lay.setSpacing(12)
 
             lbl = QLabel("Шрифты документа и структурные заголовки")
@@ -511,22 +622,28 @@ if HAS_PYSIDE6:
 
             g = QGridLayout()
             g.setSpacing(10)
-            self.combo_font_primary = QComboBox()
-            self.combo_font_primary.setEditable(True)
-            self.combo_font_primary.addItems(DOC_FONT_CHOICES)
-            self.combo_font_primary.currentTextChanged.connect(self._on_fonts_changed)
-            self._attach_ctx(self.combo_font_primary.lineEdit())
+            self.btn_font_primary = FontPickerButton(
+                initial_font="Times New Roman",
+                default_category="serif",
+                theme_getter=self._t,
+                context_menu_installer=self._attach_ctx,
+                parent=w,
+            )
+            self.btn_font_primary.font_changed.connect(lambda _: self._on_fonts_changed())
 
-            self.combo_font_mono = QComboBox()
-            self.combo_font_mono.setEditable(True)
-            self.combo_font_mono.addItems(["Courier New", "Consolas", "JetBrains Mono", "DejaVu Sans Mono"])
-            self.combo_font_mono.currentTextChanged.connect(self._on_fonts_changed)
-            self._attach_ctx(self.combo_font_mono.lineEdit())
+            self.btn_font_mono = FontPickerButton(
+                initial_font="Courier New",
+                default_category="mono",
+                theme_getter=self._t,
+                context_menu_installer=self._attach_ctx,
+                parent=w,
+            )
+            self.btn_font_mono.font_changed.connect(lambda _: self._on_fonts_changed())
 
             g.addWidget(QLabel("Основной шрифт (primary):"), 0, 0)
-            g.addWidget(self.combo_font_primary, 0, 1)
+            g.addWidget(self.btn_font_primary, 0, 1)
             g.addWidget(QLabel("Моноширинный шрифт (monospace):"), 1, 0)
-            g.addWidget(self.combo_font_mono, 1, 1)
+            g.addWidget(self.btn_font_mono, 1, 1)
             lay.addLayout(g)
 
             lbl_st = QLabel("Структурные заголовки (по одному в строке, без номера):")
@@ -545,11 +662,11 @@ if HAS_PYSIDE6:
         def _build_style_section(self) -> QWidget:
             outer = QWidget()
             outer_lay = QHBoxLayout(outer)
-            outer_lay.setContentsMargins(14, 14, 14, 14)
+            outer_lay.setContentsMargins(18, 16, 18, 16)
             outer_lay.setSpacing(14)
 
             st_side = QWidget()
-            st_side.setFixedWidth(182)
+            st_side.setFixedWidth(168)
             ss_lay = QVBoxLayout(st_side)
             ss_lay.setContentsMargins(0, 0, 0, 0)
             ss_lay.setSpacing(8)
@@ -558,6 +675,9 @@ if HAS_PYSIDE6:
             ss_lay.addWidget(lbl_st_list)
 
             self.list_styles = QListWidget()
+            self.list_styles.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.list_styles.setTextElideMode(Qt.ElideRight)
+            self.list_styles.setFocusPolicy(Qt.NoFocus)
             self.list_styles.currentItemChanged.connect(self._on_style_selected)
             ss_lay.addWidget(self.list_styles, 1)
 
@@ -578,7 +698,7 @@ if HAS_PYSIDE6:
 
             w = QWidget()
             lay = QVBoxLayout(w)
-            lay.setContentsMargins(4, 2, 4, 2)
+            lay.setContentsMargins(8, 4, 8, 4)
             lay.setSpacing(12)
             outer_lay.addWidget(w, 1)
 
@@ -608,13 +728,31 @@ if HAS_PYSIDE6:
             g = QGridLayout()
             g.setSpacing(10)
 
-            self.combo_st_font = QComboBox()
+            st_font_box = QVBoxLayout()
+            st_font_box.setContentsMargins(0, 0, 0, 0)
+            st_font_box.setSpacing(6)
+            self.combo_st_font = StyledMenuSelect(self._t)
+            self.combo_st_font.setMinimumWidth(0)
+            self.combo_st_font.setMaximumWidth(185)
             self.combo_st_font.addItem("Основной (primary)", "primary")
             self.combo_st_font.addItem("Моноширинный (monospace)", "monospace")
-            self.combo_st_font.currentIndexChanged.connect(self._on_style_prop_changed)
+            self.combo_st_font.addItem("Свой системный шрифт", "__custom__")
+            self.combo_st_font.currentIndexChanged.connect(self._on_style_font_mode_changed)
+            st_font_box.addWidget(self.combo_st_font)
+            self.btn_st_font_pick = FontPickerButton(
+                initial_font="Times New Roman",
+                default_category="all",
+                max_width=185,
+                theme_getter=self._t,
+                context_menu_installer=self._attach_ctx,
+                parent=w,
+            )
+            self.btn_st_font_pick.font_changed.connect(self._on_style_custom_font_picked)
+            self.btn_st_font_pick.setVisible(False)
+            st_font_box.addWidget(self.btn_st_font_pick)
 
             self.sp_st_size = self._make_dspin(6.0, 48.0, 0.5, 14.0, " пт")
-            self.combo_st_align = QComboBox()
+            self.combo_st_align = StyledMenuSelect(self._t)
             for val, txt in [("justify", "По ширине"), ("left", "По левому краю"), ("center", "По центру"), ("right", "По правому краю")]:
                 self.combo_st_align.addItem(txt, val)
             self.combo_st_align.currentIndexChanged.connect(self._on_style_prop_changed)
@@ -622,6 +760,9 @@ if HAS_PYSIDE6:
             color_row = QHBoxLayout()
             color_row.setSpacing(6)
             self.ed_st_color = QLineEdit("#000000")
+            self.ed_st_color.setFixedHeight(34)
+            self.ed_st_color.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            self.ed_st_color.setTextMargins(0, 0, 0, 0)
             self.ed_st_color.setMaxLength(7)
             self._attach_ctx(self.ed_st_color)
             self.ed_st_color.textEdited.connect(self._on_style_prop_changed)
@@ -633,7 +774,7 @@ if HAS_PYSIDE6:
             color_row.addWidget(self.btn_st_color)
 
             g.addWidget(QLabel("Гарнитура:"), 0, 0)
-            g.addWidget(self.combo_st_font, 0, 1)
+            g.addLayout(st_font_box, 0, 1)
             g.addWidget(QLabel("Кегль:"), 0, 2)
             g.addWidget(self.sp_st_size, 0, 3)
 
@@ -657,7 +798,7 @@ if HAS_PYSIDE6:
             g.addWidget(QLabel("Интервал после:"), 3, 2)
             g.addWidget(self.sp_st_after, 3, 3)
 
-            self.combo_st_outline = QComboBox()
+            self.combo_st_outline = StyledMenuSelect(self._t)
             self.combo_st_outline.addItem("Обычный абзац (нет)", None)
             self.combo_st_outline.addItem("Уровень 1 (Заголовок 1)", 0)
             self.combo_st_outline.addItem("Уровень 2 (Заголовок 2)", 1)
@@ -693,7 +834,7 @@ if HAS_PYSIDE6:
         def _build_tables_section(self) -> QWidget:
             w = QWidget()
             lay = QVBoxLayout(w)
-            lay.setContentsMargins(18, 16, 18, 16)
+            lay.setContentsMargins(20, 18, 20, 18)
             lay.setSpacing(12)
 
             lbl = QLabel("Оформление таблиц")
@@ -702,7 +843,7 @@ if HAS_PYSIDE6:
 
             g = QGridLayout()
             g.setSpacing(10)
-            self.combo_tbl_border = QComboBox()
+            self.combo_tbl_border = StyledMenuSelect(self._t)
             self.combo_tbl_border.addItem("Полная сетка (ГОСТ)", "full_grid")
             self.combo_tbl_border.addItem("Открытая книга (IEEE / ВАК)", "gost_open")
             self.combo_tbl_border.currentIndexChanged.connect(self._on_tables_changed)
@@ -749,66 +890,118 @@ if HAS_PYSIDE6:
         def _build_lists_section(self) -> QWidget:
             w = QWidget()
             lay = QVBoxLayout(w)
-            lay.setContentsMargins(18, 16, 18, 16)
+            lay.setContentsMargins(20, 18, 20, 18)
             lay.setSpacing(12)
 
-            lbl = QLabel("Параметры списков Word")
+            lbl = QLabel("Многоуровневые списки Word")
             lbl.setStyleSheet("font-size: 14.5px; font-weight: 600;")
             lay.addWidget(lbl)
 
-            g = QGridLayout()
-            g.setSpacing(10)
+            hint = QLabel(
+                "Отступ маркера от левого поля = Базовый отступ + Уровень × Шаг вложенности. "
+                "Выступ задаёт расстояние от маркера до текста (при разделителе «Табуляция») и отступ переноса 2-й строки."
+            )
+            hint.setWordWrap(True)
+            hint.setStyleSheet("font-size: 12px; opacity: 0.72;")
+            lay.addWidget(hint)
+
+            # 1. Общие параметры
+            lbl_gen = QLabel("Общие параметры")
+            lbl_gen.setStyleSheet("font-size: 13px; font-weight: 600; margin-top: 2px;")
+            lay.addWidget(lbl_gen)
+
+            g_gen = QGridLayout()
+            g_gen.setSpacing(10)
             self.sp_lst_base = self._make_dspin(0.0, 40.0, 0.5, 12.5, " мм")
             self.sp_lst_step = self._make_dspin(1.0, 25.0, 0.5, 6.0, " мм")
-            self.sp_lst_hdash = self._make_dspin(1.0, 20.0, 0.5, 4.5, " мм")
-            self.sp_lst_hbul = self._make_dspin(1.0, 20.0, 0.5, 4.5, " мм")
-            self.sp_lst_hord = self._make_dspin(1.0, 20.0, 0.5, 6.5, " мм")
-            self.sp_lst_htask = self._make_dspin(1.0, 20.0, 0.5, 5.5, " мм")
             self.sp_lst_sb = self._make_dspin(0.0, 24.0, 0.5, 0.0, " пт")
             self.sp_lst_sa = self._make_dspin(0.0, 24.0, 0.5, 0.0, " пт")
+            self.sp_lst_line = self._make_dspin(0.8, 3.0, 0.05, 1.5, "×")
 
-            g.addWidget(QLabel("Базовый отступ:"), 0, 0)
-            g.addWidget(self.sp_lst_base, 0, 1)
-            g.addWidget(QLabel("Шаг вложенности:"), 0, 2)
-            g.addWidget(self.sp_lst_step, 0, 3)
+            self.combo_lst_sep = StyledMenuSelect(self._t)
+            self.combo_lst_sep.addItem("Табуляция (по выступу)", "\t")
+            self.combo_lst_sep.addItem("Неразрывный пробел (ГОСТ)", "\u00a0")
+            self.combo_lst_sep.addItem("Обычный пробел", " ")
+            self.combo_lst_sep.addItem("Без разделителя", "")
+            self.combo_lst_sep.currentIndexChanged.connect(self._on_lists_changed)
 
-            g.addWidget(QLabel("Выступ тире:"), 1, 0)
-            g.addWidget(self.sp_lst_hdash, 1, 1)
-            g.addWidget(QLabel("Выступ маркера:"), 1, 2)
-            g.addWidget(self.sp_lst_hbul, 1, 3)
+            self.combo_lst_align = StyledMenuSelect(self._t)
+            self.combo_lst_align.addItem("По ширине", "justify")
+            self.combo_lst_align.addItem("По левому краю", "left")
+            self.combo_lst_align.addItem("По центру", "center")
+            self.combo_lst_align.addItem("По правому краю", "right")
+            self.combo_lst_align.currentIndexChanged.connect(self._on_lists_changed)
 
-            g.addWidget(QLabel("Выступ нумерации:"), 2, 0)
-            g.addWidget(self.sp_lst_hord, 2, 1)
-            g.addWidget(QLabel("Выступ чекбокса:"), 2, 2)
-            g.addWidget(self.sp_lst_htask, 2, 3)
+            self.chk_lst_keep = QCheckBox("Не разрывать пункт списка")
+            self.chk_lst_keep.stateChanged.connect(self._on_lists_changed)
 
-            g.addWidget(QLabel("Интервал перед:"), 3, 0)
-            g.addWidget(self.sp_lst_sb, 3, 1)
-            g.addWidget(QLabel("Интервал после:"), 3, 2)
-            g.addWidget(self.sp_lst_sa, 3, 3)
+            g_gen.addWidget(QLabel("Базовый отступ:"), 0, 0)
+            g_gen.addWidget(self.sp_lst_base, 0, 1)
+            g_gen.addWidget(QLabel("Шаг вложенности:"), 0, 2)
+            g_gen.addWidget(self.sp_lst_step, 0, 3)
 
+            g_gen.addWidget(QLabel("Интервал перед:"), 1, 0)
+            g_gen.addWidget(self.sp_lst_sb, 1, 1)
+            g_gen.addWidget(QLabel("Интервал после:"), 1, 2)
+            g_gen.addWidget(self.sp_lst_sa, 1, 3)
+
+            g_gen.addWidget(QLabel("Разделитель маркера:"), 2, 0)
+            g_gen.addWidget(self.combo_lst_sep, 2, 1)
+            g_gen.addWidget(QLabel("Межстрочный интервал:"), 2, 2)
+            g_gen.addWidget(self.sp_lst_line, 2, 3)
+
+            g_gen.addWidget(QLabel("Выравнивание:"), 3, 0)
+            g_gen.addWidget(self.combo_lst_align, 3, 1)
+            g_gen.addWidget(self.chk_lst_keep, 3, 2, 1, 2)
+            lay.addLayout(g_gen)
+
+            # 2. Маркерные списки
+            lbl_bul = QLabel("Маркерные списки (тире, буллиты, чекбоксы)")
+            lbl_bul.setStyleSheet("font-size: 13px; font-weight: 600; margin-top: 6px;")
+            lay.addWidget(lbl_bul)
+
+            g_bul = QGridLayout()
+            g_bul.setSpacing(10)
+            self.sp_lst_hdash = self._make_dspin(1.0, 20.0, 0.5, 4.5, " мм")
+            self.sp_lst_hbul = self._make_dspin(1.0, 20.0, 0.5, 4.5, " мм")
+            self.sp_lst_htask = self._make_dspin(1.0, 20.0, 0.5, 5.5, " мм")
             self.ed_lst_dash = QLineEdit("–")
             self._attach_ctx(self.ed_lst_dash)
             self.ed_lst_dash.textEdited.connect(self._on_lists_changed)
             self.ed_lst_bullets = QLineEdit("•, ◦, ▪")
             self._attach_ctx(self.ed_lst_bullets)
             self.ed_lst_bullets.textEdited.connect(self._on_lists_changed)
-            self.combo_lst_sep = QComboBox()
-            self.combo_lst_sep.addItem("Неразрывный пробел (ГОСТ)", "\u00a0")
-            self.combo_lst_sep.addItem("Обычный пробел", " ")
-            self.combo_lst_sep.addItem("Табуляция", "\t")
-            self.combo_lst_sep.currentIndexChanged.connect(self._on_lists_changed)
 
-            g.addWidget(QLabel("Символ тире:"), 4, 0)
-            g.addWidget(self.ed_lst_dash, 4, 1)
-            g.addWidget(QLabel("Маркеры уровней:"), 4, 2)
-            g.addWidget(self.ed_lst_bullets, 4, 3)
-            g.addWidget(QLabel("Разделитель маркера:"), 5, 0)
-            g.addWidget(self.combo_lst_sep, 5, 1, 1, 3)
+            g_bul.addWidget(QLabel("Символ тире:"), 0, 0)
+            g_bul.addWidget(self.ed_lst_dash, 0, 1)
+            g_bul.addWidget(QLabel("Выступ тире:"), 0, 2)
+            g_bul.addWidget(self.sp_lst_hdash, 0, 3)
 
-            for sp in (self.sp_lst_base, self.sp_lst_step, self.sp_lst_hdash, self.sp_lst_hbul, self.sp_lst_hord, self.sp_lst_htask, self.sp_lst_sb, self.sp_lst_sa):
+            g_bul.addWidget(QLabel("Маркеры уровней:"), 1, 0)
+            g_bul.addWidget(self.ed_lst_bullets, 1, 1)
+            g_bul.addWidget(QLabel("Выступ маркера:"), 1, 2)
+            g_bul.addWidget(self.sp_lst_hbul, 1, 3)
+
+            g_bul.addWidget(QLabel("Выступ чекбокса:"), 2, 0)
+            g_bul.addWidget(self.sp_lst_htask, 2, 1)
+            lay.addLayout(g_bul)
+
+            # 3. Нумерованные и буквенные списки
+            lbl_ord = QLabel("Нумерованные и буквенные списки (1., 1), а))")
+            lbl_ord.setStyleSheet("font-size: 13px; font-weight: 600; margin-top: 6px;")
+            lay.addWidget(lbl_ord)
+
+            g_ord = QGridLayout()
+            g_ord.setSpacing(10)
+            self.sp_lst_hord = self._make_dspin(1.0, 20.0, 0.5, 6.5, " мм")
+            g_ord.addWidget(QLabel("Выступ нумерации:"), 0, 0)
+            g_ord.addWidget(self.sp_lst_hord, 0, 1)
+            g_ord.setColumnStretch(2, 1)
+            g_ord.setColumnStretch(3, 1)
+            lay.addLayout(g_ord)
+
+            for sp in (self.sp_lst_base, self.sp_lst_step, self.sp_lst_hdash, self.sp_lst_hbul, self.sp_lst_hord, self.sp_lst_htask, self.sp_lst_sb, self.sp_lst_sa, self.sp_lst_line):
                 sp.valueChanged.connect(self._on_lists_changed)
-            lay.addLayout(g)
             lay.addStretch()
             return w
 
@@ -818,6 +1011,11 @@ if HAS_PYSIDE6:
             sp.setSingleStep(step)
             sp.setDecimals(2 if step < 0.5 else 1)
             sp.setValue(val)
+            sp.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            sp.setFixedHeight(34)
+            if sp.lineEdit() is not None:
+                sp.lineEdit().setStyleSheet("padding: 0px; margin: 0px; background: transparent; border: none;")
+                sp.lineEdit().setTextMargins(0, 0, 0, 0)
             if suffix:
                 sp.setSuffix(suffix)
             return sp
@@ -834,6 +1032,11 @@ if HAS_PYSIDE6:
                     f"QMenu::item {{ padding: 7px 14px; border-radius: 6px; font-size: 13px; color: {t['text']}; }}"
                     f"QMenu::item:selected {{ background-color: {t['accent_soft']}; color: {t['accent_text']}; }}"
                 )
+            for sel_w in self.findChildren(StyledMenuSelect):
+                sel_w.apply_theme()
+            self.load_templates(self._current_tpl_id)
+            self.style().unpolish(self)
+            self.style().polish(self)
             self._mark_dirty(self._dirty)
             self._update_style_preview()
             if hasattr(self, "ed_st_color"):
@@ -946,8 +1149,12 @@ if HAS_PYSIDE6:
 
             # Fonts & Structural titles
             fnt = self._working_cfg.setdefault("fonts", {})
-            self.combo_font_primary.setCurrentText(str(fnt.get("primary", {}).get("name", "Times New Roman")))
-            self.combo_font_mono.setCurrentText(str(fnt.get("monospace", {}).get("name", "Courier New")))
+            f_prim = fnt.get("primary", {})
+            f_mono = fnt.get("monospace", {})
+            prim_name = f_prim.get("name", "Times New Roman") if isinstance(f_prim, dict) else (str(f_prim) if f_prim else "Times New Roman")
+            mono_name = f_mono.get("name", "Courier New") if isinstance(f_mono, dict) else (str(f_mono) if f_mono else "Courier New")
+            self.btn_font_primary.set_font_name(str(prim_name))
+            self.btn_font_mono.set_font_name(str(mono_name))
             self.ed_struct_titles.setPlainText("\n".join(self._working_cfg.get("structural_titles", [])))
 
             # Tables
@@ -959,6 +1166,10 @@ if HAS_PYSIDE6:
             self.ed_tbl_shade.setText(str(shade or "#F1F5F9"))
             self.ed_tbl_shade.setEnabled(bool(shade))
             pad = tbl.get("cell_padding_mm", {})
+            if isinstance(pad, (int, float)):
+                pad = {"top": float(pad), "bottom": float(pad), "left": float(pad), "right": float(pad)}
+            elif not isinstance(pad, dict):
+                pad = {}
             self.sp_pad_t.setValue(float(pad.get("top", 1.0)))
             self.sp_pad_b.setValue(float(pad.get("bottom", 1.0)))
             self.sp_pad_l.setValue(float(pad.get("left", 1.8)))
@@ -984,6 +1195,10 @@ if HAS_PYSIDE6:
             self.ed_lst_bullets.setText(", ".join(lst.get("bullet_symbols", ["•", "◦", "▪"])))
             sep_idx = self.combo_lst_sep.findData(lst.get("marker_separator", "\u00a0"))
             self.combo_lst_sep.setCurrentIndex(max(0, sep_idx))
+            self.sp_lst_line.setValue(float(lst.get("line_spacing", 1.5) or 1.5))
+            l_align_idx = self.combo_lst_align.findData(lst.get("alignment", "justify"))
+            self.combo_lst_align.setCurrentIndex(max(0, l_align_idx))
+            self.chk_lst_keep.setChecked(bool(lst.get("keep_together", False)))
 
             # Styles list
             self._populate_style_list()
@@ -993,13 +1208,19 @@ if HAS_PYSIDE6:
         def _populate_style_list(self, select_key: str = ""):
             self.list_styles.clear()
             styles = self._working_cfg.setdefault("styles", {})
-            ordered = [k for k in CANONICAL_STYLE_ORDER if k in styles]
-            for k in styles.keys():
-                if k not in ordered:
-                    ordered.append(k)
+            order_idx = {name: i for i, name in enumerate(CANONICAL_STYLE_ORDER)}
+            ordered = sorted(
+                styles.keys(),
+                key=lambda k: (order_idx.get(STYLE_DISPLAY_NAMES.get(k, k), 999), STYLE_DISPLAY_NAMES.get(k, k))
+            )
             target_row = 0
             for idx, sk in enumerate(ordered):
-                self.list_styles.addItem(QListWidgetItem(sk))
+                disp_name = STYLE_DISPLAY_NAMES.get(sk, sk)
+                it = QListWidgetItem(disp_name)
+                it.setData(Qt.UserRole, sk)
+                it.setToolTip(disp_name)
+                it.setSizeHint(QSize(148, 32))
+                self.list_styles.addItem(it)
                 if sk == select_key:
                     target_row = idx
             if ordered:
@@ -1010,13 +1231,14 @@ if HAS_PYSIDE6:
             if self._loading or current is None:
                 return
             self._switch_section(2)
-            self._load_style_into_form(current.text())
+            self._load_style_into_form(current.data(Qt.UserRole) or current.text())
 
         def _load_style_into_form(self, style_key: str):
             self._loading = True
             self._current_style_key = style_key
             s_def = self._working_cfg.get("styles", {}).get(style_key, {})
-            self.lbl_style_title.setText(f"Стиль: {style_key}")
+            disp_name = STYLE_DISPLAY_NAMES.get(style_key, style_key)
+            self.lbl_style_title.setText(f"Стиль: {disp_name}")
 
             word_map_hint = {
                 "Заголовок структурный": "Word: Title",
@@ -1028,11 +1250,19 @@ if HAS_PYSIDE6:
                 "Подпись рисунка": "Word: Caption",
                 "Подпись к рисунку": "Word: Caption",
                 "Цитата": "Word: Quote",
-            }.get(style_key, "Пользовательский стиль")
+            }.get(disp_name, "Пользовательский стиль")
             self.lbl_style_word_map.setText(word_map_hint)
 
-            f_idx = self.combo_st_font.findData(s_def.get("font", "primary"))
-            self.combo_st_font.setCurrentIndex(max(0, f_idx))
+            f_val = str(s_def.get("font", "primary") or "primary")
+            if f_val in ("primary", "monospace"):
+                f_idx = self.combo_st_font.findData(f_val)
+                self.combo_st_font.setCurrentIndex(max(0, f_idx))
+                self.btn_st_font_pick.setVisible(False)
+            else:
+                f_idx = self.combo_st_font.findData("__custom__")
+                self.combo_st_font.setCurrentIndex(max(0, f_idx))
+                self.btn_st_font_pick.set_font_name(f_val)
+                self.btn_st_font_pick.setVisible(True)
             self.sp_st_size.setValue(float(s_def.get("size_pt", 14.0)))
             a_idx = self.combo_st_align.findData(s_def.get("alignment", "justify"))
             self.combo_st_align.setCurrentIndex(max(0, a_idx))
@@ -1081,7 +1311,10 @@ if HAS_PYSIDE6:
                 return
             s_def = self._working_cfg.get("styles", {}).get(self._current_style_key, {})
             f_key = s_def.get("font", "primary")
-            f_name = self._working_cfg.get("fonts", {}).get(f_key, {}).get("name", "Times New Roman")
+            if f_key in ("primary", "monospace"):
+                f_name = self._working_cfg.get("fonts", {}).get(f_key, {}).get("name", "Times New Roman")
+            else:
+                f_name = str(f_key or "Times New Roman")
             sz = max(9, min(22, int(round(float(s_def.get("size_pt", 14.0))))))
             col = str(s_def.get("color", "#000000") or "#000000")
             if not col.startswith("#"):
@@ -1138,8 +1371,8 @@ if HAS_PYSIDE6:
         def _on_fonts_changed(self):
             if self._loading:
                 return
-            p_name = self.combo_font_primary.currentText().strip() or "Times New Roman"
-            m_name = self.combo_font_mono.currentText().strip() or "Courier New"
+            p_name = self.btn_font_primary.font_name() or "Times New Roman"
+            m_name = self.btn_font_mono.font_name() or "Courier New"
             self._working_cfg["fonts"] = {
                 "primary": {"name": p_name, "ascii": p_name, "hAnsi": p_name, "cs": p_name, "eastAsia": p_name},
                 "monospace": {"name": m_name, "ascii": m_name, "hAnsi": m_name, "cs": m_name, "eastAsia": m_name},
@@ -1154,11 +1387,27 @@ if HAS_PYSIDE6:
             self._working_cfg["structural_titles"] = lines
             self._mark_dirty(True)
 
+        def _on_style_font_mode_changed(self):
+            if self._loading:
+                return
+            mode = self.combo_st_font.currentData()
+            is_custom = (mode == "__custom__")
+            self.btn_st_font_pick.setVisible(is_custom)
+            if is_custom and not self.btn_st_font_pick.font_name():
+                self.btn_st_font_pick.set_font_name("Times New Roman")
+            self._on_style_prop_changed()
+
+        def _on_style_custom_font_picked(self, fam: str):
+            if self._loading:
+                return
+            self._on_style_prop_changed()
+
         def _on_style_prop_changed(self):
             if self._loading or not self._current_style_key:
                 return
             s_def = self._working_cfg.setdefault("styles", {}).setdefault(self._current_style_key, {})
-            s_def["font"] = self.combo_st_font.currentData() or "primary"
+            f_mode = self.combo_st_font.currentData() or "primary"
+            s_def["font"] = self.btn_st_font_pick.font_name() if f_mode == "__custom__" else f_mode
             s_def["size_pt"] = round(self.sp_st_size.value(), 2)
             s_def["alignment"] = self.combo_st_align.currentData() or "justify"
             col = self.ed_st_color.text().strip()
@@ -1217,23 +1466,38 @@ if HAS_PYSIDE6:
             lst["space_after_pt"] = round(self.sp_lst_sa.value(), 1)
             lst["dash_symbol"] = self.ed_lst_dash.text().strip() or "–"
             lst["bullet_symbols"] = [s.strip() for s in self.ed_lst_bullets.text().split(",") if s.strip()] or ["•"]
-            lst["marker_separator"] = self.combo_lst_sep.currentData() or "\u00a0"
+            sep_val = self.combo_lst_sep.currentData()
+            lst["marker_separator"] = sep_val if sep_val is not None else "\u00a0"
+            lst["line_spacing"] = round(self.sp_lst_line.value(), 2)
+            lst["alignment"] = self.combo_lst_align.currentData() or "justify"
+            lst["keep_together"] = self.chk_lst_keep.isChecked()
             self._mark_dirty(True)
 
         # --- Template & Style CRUD ---
         def _ask_name_dialog(self, title: str, label: str, default: str = "") -> Optional[str]:
             dlg = QDialog(self)
-            dlg.setWindowTitle(title)
-            dlg.setMinimumWidth(360)
+            dlg.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+            dlg.setAttribute(Qt.WA_TranslucentBackground, True)
+            dlg.setMinimumWidth(380)
             t = self._t()
-            dlg.setStyleSheet(
-                f"QDialog {{ background-color: {t['bg_window']}; color: {t['text']}; }}"
-                f"QLabel {{ color: {t['text']}; }}"
+            outer = QVBoxLayout(dlg)
+            outer.setContentsMargins(8, 8, 8, 8)
+            box = QFrame()
+            box.setObjectName("AskNameBox")
+            box.setAttribute(Qt.WA_StyledBackground, True)
+            box.setStyleSheet(
+                f"QFrame#AskNameBox {{ background-color: {t['bg_window']}; border: 1px solid {t['border_strong']}; border-radius: 14px; }}"
             )
-            lay = QVBoxLayout(dlg)
-            lay.setContentsMargins(18, 16, 18, 16)
+            outer.addWidget(box)
+            lay = QVBoxLayout(box)
+            lay.setContentsMargins(20, 18, 20, 18)
             lay.setSpacing(10)
-            lay.addWidget(QLabel(label))
+            lbl_t = QLabel(title)
+            lbl_t.setStyleSheet(f"color: {t['text']}; font-size: 14px; font-weight: 700; border: none; background: transparent;")
+            lay.addWidget(lbl_t)
+            lbl_l = QLabel(label)
+            lbl_l.setStyleSheet(f"color: {t['text_2']}; font-size: 13px; border: none; background: transparent;")
+            lay.addWidget(lbl_l)
             ed = QLineEdit(default)
             self._attach_ctx(ed)
             lay.addWidget(ed)
@@ -1302,13 +1566,14 @@ if HAS_PYSIDE6:
             outer = QVBoxLayout(dlg)
             outer.setContentsMargins(12, 12, 12, 12)
             box = QFrame()
+            box.setObjectName("ConfirmDlgBox")
             box.setAttribute(Qt.WA_StyledBackground, True)
             box.setStyleSheet(
-                f"QFrame {{ background-color: {t['bg_window']}; border: 1px solid {t['border_strong']}; border-radius: 14px; }}"
+                f"QFrame#ConfirmDlgBox {{ background-color: {t['bg_window']}; border: 1px solid {t['border_strong']}; border-radius: 14px; }}"
             )
             outer.addWidget(box)
             lay = QVBoxLayout(box)
-            lay.setContentsMargins(18, 16, 18, 16)
+            lay.setContentsMargins(20, 18, 20, 18)
             lay.setSpacing(10)
             lbl_t = QLabel(title)
             lbl_t.setStyleSheet(f"color: {t['text']}; font-size: 14px; font-weight: 700; border: none; background: transparent;")
