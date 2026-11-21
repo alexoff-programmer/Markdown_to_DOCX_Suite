@@ -17,6 +17,8 @@ ClipboardDocxRunner & Batch Converter
 from __future__ import annotations
 
 import os
+import gc
+import copy
 import sys
 import json
 import time
@@ -82,13 +84,19 @@ try:
         QPushButton, QButtonGroup, QFrame, QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
         QFileDialog, QScrollArea, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
         QProgressBar, QStackedWidget, QAbstractItemView, QTextEdit, QPlainTextEdit, QSplitter,
-        QListWidget, QMessageBox, QSizePolicy, QSpinBox, QDoubleSpinBox, QColorDialog, QSizeGrip
+        QListWidget, QSizePolicy, QSpinBox, QDoubleSpinBox, QColorDialog, QSizeGrip
     )
     from template_editor_widget import TemplateEditorWidget
     from PySide6.QtGui import (
         QIcon, QPixmap, QPainter, QColor, QFont, QCursor, QAction,
         QDragEnterEvent, QDropEvent
     )
+    try:
+        from PySide6.QtSvg import QSvgRenderer
+        HAS_QTSVG = True
+    except ImportError:
+        QSvgRenderer = None
+        HAS_QTSVG = False
     from PySide6.QtCore import (
         Qt, QObject, QAbstractNativeEventFilter, QPoint, QRect, Signal, Slot,
         QThread, QTimer, QSize, QPropertyAnimation, QEasingCurve, QFileSystemWatcher
@@ -283,6 +291,34 @@ def register_custom_template_path(file_path: Path):
     except Exception:
         pass
 
+def unregister_template_path(file_path: Path):
+    """Удаляет путь шаблона из реестра и .templates_index.json при удалении шаблона."""
+    try:
+        resolved = str(file_path.resolve())
+    except Exception:
+        resolved = str(file_path)
+    if TEMPLATES_REGISTRY_FILE.exists():
+        try:
+            with open(TEMPLATES_REGISTRY_FILE, "r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+            if isinstance(data, list) and resolved in data:
+                data = [x for x in data if x != resolved]
+                with open(TEMPLATES_REGISTRY_FILE, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    try:
+        idx_file = file_path.parent / ".templates_index.json"
+        if idx_file.exists():
+            with open(idx_file, "r", encoding="utf-8-sig") as f:
+                d = json.load(f)
+            if isinstance(d, list) and file_path.name in d:
+                d = [x for x in d if x != file_path.name]
+                with open(idx_file, "w", encoding="utf-8") as f:
+                    json.dump(d, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
 def get_registered_template_paths() -> List[Path]:
     paths = []
     if TEMPLATES_REGISTRY_FILE.exists():
@@ -298,10 +334,13 @@ def get_registered_template_paths() -> List[Path]:
             pass
     return paths
 
+_TEMPLATES_LIST_CACHE: Dict[str, Any] = {"sig": None, "items": []}
+
 def list_available_templates() -> List[dict]:
-    """Динамически сканирует все папки шаблонов при каждом вызове (без запекания и жесткого кэша).
-    Поддерживает любые .json файлы со словарем 'styles' (с BOM или без BOM).
-    """
+    """Сканирует папки шаблонов с мгновенным кэшированием по сигнатуре файлов (путь, mtime, размер)."""
+    cur_sig = get_templates_signature()
+    if _TEMPLATES_LIST_CACHE["sig"] == cur_sig and _TEMPLATES_LIST_CACHE["items"]:
+        return list(_TEMPLATES_LIST_CACHE["items"])
     res = {}
     known_template_filenames = [
         "dstu_2026_gost_russian_names.json",
@@ -384,10 +423,41 @@ def list_available_templates() -> List[dict]:
         "corporate": 4,
         "default": 5
     }
-    return sorted(
+    sorted_items = sorted(
         res.values(),
         key=lambda t: (p_order.get(t.get("name", ""), 50), t.get("display_title", t.get("name", "")).lower())
     )
+    _TEMPLATES_LIST_CACHE["sig"] = cur_sig
+    _TEMPLATES_LIST_CACHE["items"] = sorted_items
+    return sorted_items
+
+def get_templates_signature() -> tuple:
+    """Возвращает сигнатуру (путь, mtime_ns, size) всех .json файлов шаблонов для надёжного отслеживания изменений."""
+    sig = []
+    seen = set()
+    for d in get_templates_dirs():
+        try:
+            for fp in sorted(d.glob("*.json")):
+                if fp.name == ".templates_index.json" or not fp.is_file():
+                    continue
+                rp = str(fp.resolve())
+                if rp in seen:
+                    continue
+                seen.add(rp)
+                st = fp.stat()
+                sig.append((rp, st.st_mtime_ns, st.st_size))
+        except Exception:
+            pass
+    for rp in get_registered_template_paths():
+        try:
+            rps = str(rp.resolve())
+            if rps not in seen and rp.exists() and rp.is_file():
+                seen.add(rps)
+                st = rp.stat()
+                sig.append((rps, st.st_mtime_ns, st.st_size))
+        except Exception:
+            pass
+    return tuple(sorted(sig))
 
 def load_template(name_or_path: str) -> dict:
     """Универсальная загрузка шаблона по имени (name), имени файла (stem) или полному пути."""
@@ -522,7 +592,46 @@ THEMES = {
 }
 
 
+def _ensure_ui_svg(filename: str, svg_content: str) -> str:
+    svg_p = APP_DATA_DIR / filename
+    if not svg_p.exists():
+        try:
+            svg_p.write_text(svg_content, encoding="utf-8")
+        except Exception:
+            return ""
+    return svg_p.resolve().as_posix()
+
+def _get_check_svg_url() -> str:
+    svg_p = APP_DATA_DIR / "check_white.svg"
+    if not svg_p.exists():
+        try:
+            svg_p.write_text(
+                "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
+                "<path fill='none' stroke='#FFFFFF' stroke-width='2.2' "
+                "stroke-linecap='round' stroke-linejoin='round' d='M3.5 8.5l3 3 6-6.5'/>"
+                "</svg>",
+                encoding="utf-8",
+            )
+        except Exception:
+            return ""
+    return svg_p.resolve().as_posix()
+
 def build_stylesheet(theme_name: str = "light", ui_font: str = "Inter") -> str:
+    chk_url = _get_check_svg_url()
+    chk_img_rule = f'image: url("{chk_url}");' if chk_url else ""
+    t_cur_spin = THEMES.get(theme_name, THEMES["light"])
+    stroke_col = t_cur_spin["text_2"]
+    up_url = _ensure_ui_svg(
+        f"spin_up_{theme_name}.svg",
+        f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path fill='none' stroke='{stroke_col}' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round' d='M3 7.5L6 4.5l3 3'/></svg>"
+    )
+    dn_url = _ensure_ui_svg(
+        f"spin_dn_{theme_name}.svg",
+        f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path fill='none' stroke='{stroke_col}' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round' d='M3 4.5L6 7.5l3-3'/></svg>"
+    )
+    up_img_rule = f'image: url("{up_url}");' if up_url else ""
+    dn_img_rule = f'image: url("{dn_url}");' if dn_url else ""
+
     t = THEMES.get(theme_name, THEMES["light"])
     return f"""
     QWidget {{
@@ -647,6 +756,7 @@ def build_stylesheet(theme_name: str = "light", ui_font: str = "Inter") -> str:
         color: {t['accent_text']};
         font-size: 13px;
         font-weight: 600;
+        text-align: left;
     }}
     QPushButton#TplPill:hover {{
         border-color: {t['accent']};
@@ -922,7 +1032,12 @@ def build_stylesheet(theme_name: str = "light", ui_font: str = "Inter") -> str:
     QRadioButton::indicator {{
         border-radius: 8px;
     }}
-    QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
+    QCheckBox::indicator:checked {{
+        background-color: {t['accent']};
+        border-color: {t['accent']};
+        {chk_img_rule}
+    }}
+    QRadioButton::indicator:checked {{
         background-color: {t['accent']};
         border-color: {t['accent']};
     }}
@@ -934,6 +1049,8 @@ def build_stylesheet(theme_name: str = "light", ui_font: str = "Inter") -> str:
     QFrame#DrawerPanel {{
         background-color: {t['bg_window']};
         border-left: 1px solid {t['border_strong']};
+        border-top-right-radius: 13px;
+        border-bottom-right-radius: 13px;
     }}
     QFrame.TplCard {{
         background-color: {t['bg_window']};
@@ -1030,8 +1147,49 @@ def build_stylesheet(theme_name: str = "light", ui_font: str = "Inter") -> str:
     QMenu::indicator:checked {{
         background-color: {t['accent']};
         border-color: {t['accent']};
+        {chk_img_rule}
     }}
-    QSpinBox, QDoubleSpinBox, QPlainTextEdit {{
+    QSpinBox, QDoubleSpinBox {{
+        background-color: {t['bg_window']};
+        border: 1px solid {t['border_strong']};
+        border-radius: 7px;
+        padding: 5px 24px 5px 8px;
+        color: {t['text']};
+        font-size: 13px;
+        min-height: 22px;
+    }}
+    QSpinBox::up-button, QDoubleSpinBox::up-button {{
+        subcontrol-origin: border;
+        subcontrol-position: top right;
+        width: 20px;
+        border-left: 1px solid {t['border']};
+        border-top-right-radius: 6px;
+        background-color: {t['bg_subtle']};
+    }}
+    QSpinBox::down-button, QDoubleSpinBox::down-button {{
+        subcontrol-origin: border;
+        subcontrol-position: bottom right;
+        width: 20px;
+        border-left: 1px solid {t['border']};
+        border-top: 1px solid {t['border']};
+        border-bottom-right-radius: 6px;
+        background-color: {t['bg_subtle']};
+    }}
+    QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+    QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+        background-color: {t['bg_muted']};
+    }}
+    QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+        width: 10px;
+        height: 10px;
+        {up_img_rule}
+    }}
+    QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+        width: 10px;
+        height: 10px;
+        {dn_img_rule}
+    }}
+    QPlainTextEdit {{
         background-color: {t['bg_window']};
         border: 1px solid {t['border_strong']};
         border-radius: 7px;
@@ -1056,6 +1214,10 @@ def build_stylesheet(theme_name: str = "light", ui_font: str = "Inter") -> str:
     QPushButton.SecondaryBtn:pressed {{
         background-color: {t['bg_hover']};
     }}
+    QPushButton::menu-indicator {{
+        image: none;
+        width: 0px;
+    }}
     """
 
 
@@ -1074,6 +1236,64 @@ if HAS_PYSIDE6:
         p.drawText(QRect(4, 4, 56, 56), Qt.AlignCenter, "W")
         p.end()
         return QIcon(pix)
+
+    SVG_ICONS = {
+        "settings": (
+            "<svg viewBox='0 0 24 24' fill='none' stroke='{color}' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+            "<circle cx='12' cy='12' r='3'/>"
+            "<path d='M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z'/>"
+            "</svg>"
+        ),
+        "edit": (
+            "<svg viewBox='0 0 24 24' fill='none' stroke='{color}' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+            "<path d='M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7'/>"
+            "<path d='M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z'/>"
+            "</svg>"
+        ),
+        "import": (
+            "<svg viewBox='0 0 24 24' fill='none' stroke='{color}' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+            "<path d='M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'/>"
+            "<polyline points='7 10 12 15 17 10'/>"
+            "<line x1='12' y1='15' x2='12' y2='3'/>"
+            "</svg>"
+        ),
+        "refresh": (
+            "<svg viewBox='0 0 24 24' fill='none' stroke='{color}' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+            "<polyline points='23 4 23 10 17 10'/>"
+            "<polyline points='1 20 1 14 7 14'/>"
+            "<path d='M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15'/>"
+            "</svg>"
+        ),
+    }
+
+    _SVG_ICON_CACHE: Dict[Tuple[str, str, int], QIcon] = {}
+
+    def make_svg_icon(name: str, color: str = "#334155", size: int = 16) -> QIcon:
+        cache_key = (name, color, size)
+        if cache_key in _SVG_ICON_CACHE:
+            return _SVG_ICON_CACHE[cache_key]
+        svg_tmpl = SVG_ICONS.get(name, "")
+        if not svg_tmpl:
+            return QIcon()
+        svg_bytes = svg_tmpl.format(color=color).encode("utf-8")
+        scale = 4
+        px_sz = size * scale
+        pix = QPixmap(px_sz, px_sz)
+        pix.fill(Qt.transparent)
+        if HAS_QTSVG and QSvgRenderer is not None:
+            renderer = QSvgRenderer(svg_bytes)
+            painter = QPainter(pix)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            renderer.render(painter)
+            painter.end()
+        else:
+            pix.loadFromData(svg_bytes, "SVG")
+        pix.setDevicePixelRatio(float(scale))
+        icon = QIcon()
+        icon.addPixmap(pix)
+        _SVG_ICON_CACHE[cache_key] = icon
+        return icon
 
     def apply_menu_theme(menu, theme_name: str = "light"):
         if menu is None:
@@ -1137,6 +1357,7 @@ if HAS_PYSIDE6:
                 act_cl = menu.addAction("Очистить")
                 act_cl.triggered.connect(widget.clear)
             menu.exec(widget.mapToGlobal(pos))
+            menu.deleteLater()
 
         widget.customContextMenuRequested.connect(_show_menu)
 
@@ -1154,11 +1375,7 @@ if HAS_PYSIDE6:
         box.setStyleSheet(
             f"QFrame {{ background-color: {t['bg_window']}; border: 1px solid {border_col}; border-radius: 14px; }}"
         )
-        eff = QGraphicsDropShadowEffect(box)
-        eff.setBlurRadius(24)
-        eff.setOffset(0, 6)
-        eff.setColor(QColor(15, 23, 42, 65))
-        box.setGraphicsEffect(eff)
+
         outer.addWidget(box)
 
         lay = QVBoxLayout(box)
@@ -1180,6 +1397,7 @@ if HAS_PYSIDE6:
         row.addWidget(btn_ok)
         lay.addLayout(row)
         dlg.exec()
+        dlg.deleteLater()
 
     class BatchWorker(QThread):
         progress_updated = Signal(int, int, str)
@@ -1299,6 +1517,7 @@ if HAS_PYSIDE6:
             self._anim = QPropertyAnimation(self, b"windowOpacity", self)
             self._anim.setDuration(220)
             self._anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._anim.finished.connect(self._on_faded)
 
             self._hide_timer = QTimer(self)
             self._hide_timer.setSingleShot(True)
@@ -1318,10 +1537,6 @@ if HAS_PYSIDE6:
                 scr = scr_obj.availableGeometry()
                 self.move(scr.right() - self.width() - 22, scr.bottom() - self.height() - 22)
             self._anim.stop()
-            try:
-                self._anim.finished.disconnect(self._on_faded)
-            except Exception:
-                pass
             self.setWindowOpacity(0.0)
             self.show()
             self._anim.setStartValue(0.0)
@@ -1331,20 +1546,11 @@ if HAS_PYSIDE6:
 
         def _fade_out(self):
             self._anim.stop()
-            try:
-                self._anim.finished.disconnect(self._on_faded)
-            except Exception:
-                pass
             self._anim.setStartValue(self.windowOpacity())
             self._anim.setEndValue(0.0)
-            self._anim.finished.connect(self._on_faded)
             self._anim.start()
 
         def _on_faded(self):
-            try:
-                self._anim.finished.disconnect(self._on_faded)
-            except Exception:
-                pass
             if self.windowOpacity() <= 0.05:
                 self.hide()
 
@@ -1367,6 +1573,9 @@ if HAS_PYSIDE6:
             self.two_columns = bool(cfg.get("two_columns", False))
             self.strip_body_emphasis = bool(cfg.get("strip_body_emphasis", False))
             self._drag_pos = None
+            self._fade_anim = QPropertyAnimation(self, b"windowOpacity", self)
+            self._fade_anim.setDuration(160)
+            self._fade_anim.setEasingCurve(QEasingCurve.OutCubic)
 
             self.setFixedWidth(520)
             self.setStyleSheet(build_stylesheet(self.theme_name, self.ui_font))
@@ -1375,9 +1584,7 @@ if HAS_PYSIDE6:
         def showEvent(self, event):
             super().showEvent(event)
             self.setWindowOpacity(0.0)
-            self._fade_anim = QPropertyAnimation(self, b"windowOpacity", self)
-            self._fade_anim.setDuration(160)
-            self._fade_anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._fade_anim.stop()
             self._fade_anim.setStartValue(0.0)
             self._fade_anim.setEndValue(1.0)
             self._fade_anim.start()
@@ -1434,11 +1641,7 @@ if HAS_PYSIDE6:
                 f"QFrame#DlgContainer {{ background-color: {t['bg_window']}; "
                 f"border: 1px solid {t['border_strong']}; border-radius: 14px; }}"
             )
-            shadow = QGraphicsDropShadowEffect(container)
-            shadow.setBlurRadius(28)
-            shadow.setOffset(0, 8)
-            shadow.setColor(QColor(15, 23, 42, 70))
-            container.setGraphicsEffect(shadow)
+
             outer.addWidget(container)
 
             lay = QVBoxLayout(container)
@@ -1631,38 +1834,79 @@ if HAS_PYSIDE6:
             self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
             self.setAttribute(Qt.WA_TranslucentBackground, True)
             self._win_drag_pos = None
+            self._force_closing = False
+            self._win_fade = QPropertyAnimation(self, b"windowOpacity", self)
+            self._win_fade.setEasingCurve(QEasingCurve.OutCubic)
+            self._win_fade.finished.connect(self._on_win_fade_finished)
             self.setMinimumSize(1060, 690)
             self.resize(1200, 740)
             self.setAcceptDrops(True)
 
             self._build_ui()
+            self._install_edge_resize()
             self._setup_template_watcher()
             self._apply_theme()
             self._sync_template_ui()
             self._parse_preview()
             self._update_footer_button()
 
+        def _on_win_fade_finished(self):
+            if self.windowOpacity() <= 0.05:
+                self.hide()
+                if hasattr(self, "_tpl_poll_timer"):
+                    self._tpl_poll_timer.stop()
+                gc.collect()
+
         def showEvent(self, event):
             super().showEvent(event)
-            self.setWindowOpacity(0.0)
-            self._win_fade = QPropertyAnimation(self, b"windowOpacity", self)
+            if hasattr(self, "_tpl_poll_timer") and not self._tpl_poll_timer.isActive():
+                self._check_templates_changed()
+                self._tpl_poll_timer.start()
+            self._win_fade.stop()
             self._win_fade.setDuration(190)
-            self._win_fade.setEasingCurve(QEasingCurve.OutCubic)
+            self.setWindowOpacity(0.0)
             self._win_fade.setStartValue(0.0)
             self._win_fade.setEndValue(1.0)
             self._win_fade.start()
 
         def closeEvent(self, event):
+            if self._force_closing:
+                event.accept()
+                return
             event.ignore()
-            self._win_fade = QPropertyAnimation(self, b"windowOpacity", self)
+            self._win_fade.stop()
             self._win_fade.setDuration(160)
-            self._win_fade.setEasingCurve(QEasingCurve.OutCubic)
             self._win_fade.setStartValue(self.windowOpacity())
             self._win_fade.setEndValue(0.0)
-            self._win_fade.finished.connect(self.hide)
             self._win_fade.start()
             if self.app_controller and hasattr(self.app_controller, "toast"):
                 self.app_controller.toast.show_toast("Свёрнуто в трей. Хоткеи Ctrl+Alt+W / Ctrl+Alt+B активны", self.theme_name)
+
+        def cleanup(self):
+            self._force_closing = True
+            for t_attr in ("_tpl_poll_timer", "_tpl_reload_timer", "_preview_timer"):
+                t_obj = getattr(self, t_attr, None)
+                if t_obj is not None:
+                    t_obj.stop()
+            if hasattr(self, "_tpl_watcher"):
+                try:
+                    dirs = self._tpl_watcher.directories()
+                    files = self._tpl_watcher.files()
+                    if dirs:
+                        self._tpl_watcher.removePaths(dirs)
+                    if files:
+                        self._tpl_watcher.removePaths(files)
+                except Exception:
+                    pass
+            w = getattr(self, "worker", None)
+            if w is not None:
+                try:
+                    if w.isRunning():
+                        w.cancel()
+                        w.wait(2000)
+                except Exception:
+                    pass
+            self.hide()
 
         def dragEnterEvent(self, event: QDragEnterEvent):
             if event.mimeData().hasUrls():
@@ -1671,6 +1915,24 @@ if HAS_PYSIDE6:
         def dropEvent(self, event: QDropEvent):
             paths = [u.toLocalFile() for u in event.mimeData().urls() if u.toLocalFile()]
             if not paths:
+                return
+            docx_paths = [p for p in paths if Path(p).is_file() and Path(p).suffix.lower() == ".docx"]
+            if docx_paths:
+                if self.mode == "text" and self.rb_append.isChecked() and len(docx_paths) == 1:
+                    self.ed_append_target.setText(docx_paths[0])
+                    self.config["last_append_target"] = docx_paths[0]
+                    save_config(self.config)
+                    self._toast(f"Выбран целевой DOCX: {Path(docx_paths[0]).name}")
+                else:
+                    self._switch_mode("merge")
+                    added_m = 0
+                    for dp in docx_paths:
+                        if dp not in self.merge_files:
+                            self.merge_files.append(dp)
+                            added_m += 1
+                    if added_m:
+                        self._sync_merge_list_ui()
+                        self._toast(f"Добавлено DOCX для склейки: {added_m}")
                 return
             if len(paths) == 1 and Path(paths[0]).is_file() and Path(paths[0]).suffix.lower() in (".md", ".markdown", ".txt"):
                 fp = Path(paths[0])
@@ -1705,11 +1967,22 @@ if HAS_PYSIDE6:
                     b_th.style().polish(b_th)
             if hasattr(self, "tpl_popover"):
                 self._render_tpl_cards()
+            t_cur = THEMES.get(self.theme_name, THEMES["light"])
+            if hasattr(self, "btn_settings"):
+                self.btn_settings.setIcon(make_svg_icon("settings", t_cur["text_2"], 17))
+            if hasattr(self, "btn_pop_edit"):
+                self.btn_pop_edit.setIcon(make_svg_icon("edit", t_cur["text_2"], 15))
+            if hasattr(self, "btn_pop_imp"):
+                self.btn_pop_imp.setIcon(make_svg_icon("import", t_cur["text_2"], 15))
+            if hasattr(self, "btn_pop_ref"):
+                self.btn_pop_ref.setIcon(make_svg_icon("refresh", t_cur["text_2"], 15))
+            if hasattr(self, "lbl_hdr_tpl_text"):
+                self.lbl_hdr_tpl_text.setStyleSheet(f"color: {t_cur['accent_text']}; background: transparent; border: none; font-size: 13px; font-weight: 600;")
             for m_obj in self.findChildren(QMenu):
                 apply_menu_theme(m_obj, self.theme_name)
             if self.app_controller and getattr(self.app_controller, "_tray_menu", None) is not None:
                 apply_menu_theme(self.app_controller._tray_menu, self.theme_name)
-            if hasattr(self, "template_editor"):
+            if getattr(self, "template_editor", None) is not None:
                 self.template_editor.apply_theme()
             if hasattr(self, "table_queue"):
                 self._refresh_queue_table()
@@ -1732,11 +2005,96 @@ if HAS_PYSIDE6:
             if self.isMaximized():
                 self.showNormal()
                 if hasattr(self, "_outer_lay"):
-                    self._outer_lay.setContentsMargins(10, 10, 10, 10)
+                    self._outer_lay.setContentsMargins(2, 2, 2, 2)
             else:
                 if hasattr(self, "_outer_lay"):
                     self._outer_lay.setContentsMargins(0, 0, 0, 0)
                 self.showMaximized()
+
+        def _install_edge_resize(self):
+            self._resize_margin = 7
+            self._resize_edges = Qt.Edges()
+            self._resize_active = False
+            self._resize_start_pos = None
+            self._resize_start_geom = None
+            if QApplication.instance() is not None:
+                QApplication.instance().installEventFilter(self)
+
+        def _detect_edges(self, global_pos: QPoint) -> Qt.Edges:
+            if self.isMaximized():
+                return Qt.Edges()
+            local = self.mapFromGlobal(global_pos)
+            w, h = self.width(), self.height()
+            m = self._resize_margin
+            if not (0 <= local.x() <= w and 0 <= local.y() <= h):
+                return Qt.Edges()
+            edges = Qt.Edges()
+            if local.x() <= m:
+                edges |= Qt.LeftEdge
+            elif local.x() >= w - m:
+                edges |= Qt.RightEdge
+            if local.y() <= m:
+                edges |= Qt.TopEdge
+            elif local.y() >= h - m:
+                edges |= Qt.BottomEdge
+            return edges
+
+        def _cursor_for_edges(self, edges: Qt.Edges):
+            if edges in (Qt.LeftEdge | Qt.TopEdge, Qt.RightEdge | Qt.BottomEdge):
+                return Qt.SizeFDiagCursor
+            if edges in (Qt.RightEdge | Qt.TopEdge, Qt.LeftEdge | Qt.BottomEdge):
+                return Qt.SizeBDiagCursor
+            if edges & (Qt.LeftEdge | Qt.RightEdge):
+                return Qt.SizeHorCursor
+            if edges & (Qt.TopEdge | Qt.BottomEdge):
+                return Qt.SizeVerCursor
+            return None
+
+        def eventFilter(self, obj, event):
+            try:
+                if self.isVisible() and hasattr(event, "globalPosition") and isinstance(obj, QWidget) and obj.window() is self:
+                    etype = event.type()
+                    if etype == event.Type.MouseMove and not self._resize_active:
+                        edges = self._detect_edges(event.globalPosition().toPoint())
+                        cur = self._cursor_for_edges(edges)
+                        if cur is not None:
+                            self.setCursor(cur)
+                        elif self.cursor().shape() in (Qt.SizeHorCursor, Qt.SizeVerCursor, Qt.SizeFDiagCursor, Qt.SizeBDiagCursor):
+                            self.unsetCursor()
+                    elif etype == event.Type.MouseButtonPress and event.button() == Qt.LeftButton:
+                        edges = self._detect_edges(event.globalPosition().toPoint())
+                        if edges:
+                            wh = self.windowHandle()
+                            if wh is not None and wh.startSystemResize(edges):
+                                return True
+                            self._resize_active = True
+                            self._resize_edges = edges
+                            self._resize_start_pos = event.globalPosition().toPoint()
+                            self._resize_start_geom = self.geometry()
+                            return True
+                    elif etype == event.Type.MouseMove and self._resize_active:
+                        delta = event.globalPosition().toPoint() - self._resize_start_pos
+                        g = QRect(self._resize_start_geom)
+                        min_w, min_h = self.minimumWidth(), self.minimumHeight()
+                        if self._resize_edges & Qt.LeftEdge:
+                            nw = max(min_w, g.width() - delta.x())
+                            g.setLeft(g.right() - nw + 1)
+                        if self._resize_edges & Qt.RightEdge:
+                            g.setWidth(max(min_w, g.width() + delta.x()))
+                        if self._resize_edges & Qt.TopEdge:
+                            nh = max(min_h, g.height() - delta.y())
+                            g.setTop(g.bottom() - nh + 1)
+                        if self._resize_edges & Qt.BottomEdge:
+                            g.setHeight(max(min_h, g.height() + delta.y()))
+                        self.setGeometry(g)
+                        return True
+                    elif etype == event.Type.MouseButtonRelease and self._resize_active:
+                        self._resize_active = False
+                        self.unsetCursor()
+                        return True
+            except Exception:
+                pass
+            return super().eventFilter(obj, event)
 
         def _hdr_mouse_press(self, event):
             if event.button() == Qt.LeftButton:
@@ -1754,19 +2112,16 @@ if HAS_PYSIDE6:
         def _build_ui(self):
             outer_root = QWidget()
             outer_root.setObjectName("MainRoot")
+            outer_root.setMouseTracking(True)
             self.setCentralWidget(outer_root)
             self._outer_lay = QVBoxLayout(outer_root)
-            self._outer_lay.setContentsMargins(10, 10, 10, 10)
+            self._outer_lay.setContentsMargins(2, 2, 2, 2)
             self._outer_lay.setSpacing(0)
 
             root = QFrame()
             root.setObjectName("WindowFrame")
             root.setAttribute(Qt.WA_StyledBackground, True)
-            win_shadow = QGraphicsDropShadowEffect(root)
-            win_shadow.setBlurRadius(24)
-            win_shadow.setOffset(0, 6)
-            win_shadow.setColor(QColor(15, 23, 42, 70))
-            root.setGraphicsEffect(win_shadow)
+
             self.window_frame = root
             self._outer_lay.addWidget(root)
 
@@ -1820,12 +2175,24 @@ if HAS_PYSIDE6:
             h_lay.addStretch()
 
             # Right controls
-            self.btn_tpl_open = QPushButton("Шаблон: ... ▾")
-            self.btn_tpl_open.setMinimumHeight(34)
-            self.btn_tpl_open.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            self.btn_tpl_open = QPushButton("")
+            self.btn_tpl_open.setFixedSize(250, 34)
             self.btn_tpl_open.setObjectName("TplPill")
             self.btn_tpl_open.setCursor(QCursor(Qt.PointingHandCursor))
             self.btn_tpl_open.clicked.connect(self._toggle_tpl_popover)
+            tpl_btn_lay = QHBoxLayout(self.btn_tpl_open)
+            tpl_btn_lay.setContentsMargins(11, 0, 10, 0)
+            tpl_btn_lay.setSpacing(6)
+            self.lbl_hdr_tpl_text = QLabel("Шаблон: ...")
+            self.lbl_hdr_tpl_text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            self.lbl_hdr_tpl_text.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self.lbl_hdr_tpl_text.setStyleSheet("background: transparent; border: none; font-size: 13px; font-weight: 600;")
+            lbl_hdr_arrow = QLabel("▾")
+            lbl_hdr_arrow.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            lbl_hdr_arrow.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            lbl_hdr_arrow.setStyleSheet("background: transparent; border: none; font-size: 12px;")
+            tpl_btn_lay.addWidget(self.lbl_hdr_tpl_text, 1)
+            tpl_btn_lay.addWidget(lbl_hdr_arrow, 0)
             h_lay.addWidget(self.btn_tpl_open)
 
             self.btn_sim_hotkey = QPushButton("Ctrl+Alt+W")
@@ -1837,9 +2204,10 @@ if HAS_PYSIDE6:
             self.btn_sim_hotkey.clicked.connect(self._trigger_hotkey_dialog)
             h_lay.addWidget(self.btn_sim_hotkey)
 
-            self.btn_settings = QPushButton("⚙️")
+            self.btn_settings = QPushButton("")
             self.btn_settings.setProperty("class", "IconBtn")
             self.btn_settings.setFixedSize(34, 34)
+            self.btn_settings.setIconSize(QSize(17, 17))
             self.btn_settings.setToolTip("Параметры приложения")
             self.btn_settings.setCursor(QCursor(Qt.PointingHandCursor))
             self.btn_settings.clicked.connect(self._open_settings_drawer)
@@ -2197,7 +2565,7 @@ if HAS_PYSIDE6:
             self.table_queue.setFrameShape(QFrame.NoFrame)
             self.table_queue.setShowGrid(False)
             self.table_queue.verticalHeader().setVisible(False)
-            self.table_queue.verticalHeader().setDefaultSectionSize(52)
+            self.table_queue.verticalHeader().setDefaultSectionSize(54)
             self.table_queue.setHorizontalHeaderLabels(["✓", "Файл", "Папка сохранения", "Размер", "Шаблон", "Статус", "Действия"])
             self.table_queue.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
             self.table_queue.setColumnWidth(0, 38)
@@ -2226,17 +2594,28 @@ if HAS_PYSIDE6:
             # Left: Merge DOCX
             c1 = QFrame()
             c1.setProperty("class", "SurfaceCard")
+            c1.setMinimumWidth(0)
             l1 = QVBoxLayout(c1)
             l1.setContentsMargins(16, 16, 16, 16)
             l1.setSpacing(10)
             lbl1 = QLabel("Склейка нескольких DOCX в один")
             lbl1.setStyleSheet("font-size: 14.5px; font-weight: 600;")
             l1.addWidget(lbl1)
-            lbl1_s = QLabel("Объединяет разделы с сохранением нумерации, таблиц, списков и изображений.")
+            lbl1_s = QLabel("Перетаскивайте файлы мышью для изменения порядка (ПКМ — удалить).")
+            lbl1_s.setWordWrap(True)
             lbl1_s.setStyleSheet("font-size: 12.5px; opacity: 0.7;")
             l1.addWidget(lbl1_s)
 
             self.list_merge = QListWidget()
+            self.list_merge.setMinimumWidth(0)
+            self.list_merge.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+            self.list_merge.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.list_merge.setTextElideMode(Qt.ElideMiddle)
+            self.list_merge.setDragDropMode(QAbstractItemView.InternalMove)
+            self.list_merge.setDefaultDropAction(Qt.MoveAction)
+            self.list_merge.model().rowsMoved.connect(self._on_merge_rows_moved)
+            self.list_merge.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.list_merge.customContextMenuRequested.connect(self._on_merge_context_menu)
             l1.addWidget(self.list_merge, 1)
 
             m_bar = QHBoxLayout()
@@ -2246,18 +2625,6 @@ if HAS_PYSIDE6:
             b_add_m.setCursor(QCursor(Qt.PointingHandCursor))
             b_add_m.clicked.connect(self._merge_add)
             m_bar.addWidget(b_add_m)
-
-            b_m_manage = QPushButton("Порядок ▾")
-            b_m_manage.setProperty("class", "SecondaryBtn")
-            b_m_manage.setCursor(QCursor(Qt.PointingHandCursor))
-            mm_menu = QMenu(b_m_manage)
-            mm_menu.addAction("Переместить выше ↑").triggered.connect(lambda: self._merge_move(-1))
-            mm_menu.addAction("Переместить ниже ↓").triggered.connect(lambda: self._merge_move(1))
-            mm_menu.addSeparator()
-            mm_menu.addAction("Удалить выбранный").triggered.connect(self._merge_remove)
-            mm_menu.addAction("Очистить список").triggered.connect(self._merge_clear)
-            b_m_manage.setMenu(mm_menu)
-            m_bar.addWidget(b_m_manage)
 
             m_bar.addStretch()
 
@@ -2325,22 +2692,34 @@ if HAS_PYSIDE6:
             return w
 
         def _build_templates_panel(self) -> QWidget:
-            self.template_editor = TemplateEditorWidget(
-                templates_provider=lambda: self.templates_cache,
-                primary_dir_provider=get_primary_templates_dir,
-                register_path_fn=register_custom_template_path,
-                context_menu_installer=lambda w: install_styled_context_menu(w, lambda: self.theme_name),
-                theme_getter=lambda: THEMES.get(self.theme_name, THEMES["light"]),
-                parent=self,
-            )
-            self.template_editor.template_saved.connect(self._on_editor_template_saved)
-            self.template_editor.toast_requested.connect(self._toast)
-            self.template_editor.load_templates(self.active_tpl)
+            self._tpl_editor_host = QWidget()
+            self._tpl_editor_host_lay = QVBoxLayout(self._tpl_editor_host)
+            self._tpl_editor_host_lay.setContentsMargins(0, 0, 0, 0)
+            self.template_editor = None
+            return self._tpl_editor_host
+
+        def _ensure_template_editor(self):
+            if self.template_editor is None:
+                self.template_editor = TemplateEditorWidget(
+                    templates_provider=lambda: self.templates_cache,
+                    primary_dir_provider=get_primary_templates_dir,
+                    register_path_fn=register_custom_template_path,
+                    unregister_path_fn=unregister_template_path,
+                    context_menu_installer=lambda w: install_styled_context_menu(w, lambda: self.theme_name),
+                    theme_getter=lambda: THEMES.get(self.theme_name, THEMES["light"]),
+                    parent=self._tpl_editor_host,
+                )
+                self.template_editor.template_saved.connect(self._on_editor_template_saved)
+                self.template_editor.template_deleted.connect(lambda _: self.reload_templates(silent=True))
+                self.template_editor.refresh_requested.connect(lambda: self.reload_templates(silent=False))
+                self.template_editor.toast_requested.connect(self._toast)
+                self._tpl_editor_host_lay.addWidget(self.template_editor)
+                self.template_editor.apply_theme()
             return self.template_editor
 
         def _build_overlays(self, parent_widget: QWidget):
             self.backdrop = QFrame(parent_widget)
-            self.backdrop.setStyleSheet("background-color: rgba(15, 23, 42, 0.32);")
+            self.backdrop.setStyleSheet("background-color: rgba(15, 23, 42, 0.32); border-radius: 13px;")
             self.backdrop.setVisible(False)
             self.backdrop.mousePressEvent = lambda e: self._close_overlays()
 
@@ -2349,11 +2728,7 @@ if HAS_PYSIDE6:
             self.tpl_popover.setObjectName("OverlayPanel")
             self.tpl_popover.setAttribute(Qt.WA_StyledBackground, True)
             self.tpl_popover.setVisible(False)
-            pop_eff = QGraphicsDropShadowEffect(self.tpl_popover)
-            pop_eff.setBlurRadius(28)
-            pop_eff.setOffset(0, 8)
-            pop_eff.setColor(QColor(15, 23, 42, 60))
-            self.tpl_popover.setGraphicsEffect(pop_eff)
+
 
             p_lay = QVBoxLayout(self.tpl_popover)
             p_lay.setContentsMargins(2, 2, 2, 4)
@@ -2367,16 +2742,36 @@ if HAS_PYSIDE6:
             lbl_ph.setStyleSheet("font-size: 13.5px; font-weight: 600;")
             ph_lay.addWidget(lbl_ph)
             ph_lay.addStretch()
-            btn_ed_tpl = QPushButton("✏️ Редактор")
-            btn_ed_tpl.setProperty("class", "SecondaryBtn")
-            btn_ed_tpl.clicked.connect(self._open_template_editor_from_popover)
-            ph_lay.addWidget(btn_ed_tpl)
-            btn_imp = QPushButton("+ Импорт")
-            btn_imp.setProperty("class", "SecondaryBtn")
-            btn_imp.clicked.connect(self._import_template)
-            ph_lay.addWidget(btn_imp)
+            self.btn_pop_edit = QPushButton("")
+            self.btn_pop_edit.setProperty("class", "IconBtn")
+            self.btn_pop_edit.setFixedSize(30, 30)
+            self.btn_pop_edit.setIconSize(QSize(15, 15))
+            self.btn_pop_edit.setToolTip("Изменить в редакторе шаблонов")
+            self.btn_pop_edit.setCursor(QCursor(Qt.PointingHandCursor))
+            self.btn_pop_edit.clicked.connect(self._open_template_editor_from_popover)
+            ph_lay.addWidget(self.btn_pop_edit)
+
+            self.btn_pop_imp = QPushButton("")
+            self.btn_pop_imp.setProperty("class", "IconBtn")
+            self.btn_pop_imp.setFixedSize(30, 30)
+            self.btn_pop_imp.setIconSize(QSize(15, 15))
+            self.btn_pop_imp.setToolTip("Импортировать шаблон (.json)")
+            self.btn_pop_imp.setCursor(QCursor(Qt.PointingHandCursor))
+            self.btn_pop_imp.clicked.connect(self._import_template)
+            ph_lay.addWidget(self.btn_pop_imp)
+
+            self.btn_pop_ref = QPushButton("")
+            self.btn_pop_ref.setProperty("class", "IconBtn")
+            self.btn_pop_ref.setFixedSize(30, 30)
+            self.btn_pop_ref.setIconSize(QSize(15, 15))
+            self.btn_pop_ref.setToolTip("Обновить список шаблонов")
+            self.btn_pop_ref.setCursor(QCursor(Qt.PointingHandCursor))
+            self.btn_pop_ref.clicked.connect(lambda: self.reload_templates(silent=False))
+            ph_lay.addWidget(self.btn_pop_ref)
             btn_pc = QPushButton("✕")
-            btn_pc.setProperty("class", "SecondaryBtn")
+            btn_pc.setProperty("class", "WinBtn")
+            btn_pc.setFixedSize(30, 30)
+            btn_pc.setCursor(QCursor(Qt.PointingHandCursor))
             btn_pc.clicked.connect(self._close_overlays)
             ph_lay.addWidget(btn_pc)
             p_lay.addWidget(p_hdr)
@@ -2394,12 +2789,9 @@ if HAS_PYSIDE6:
             # Settings Slide-over Drawer
             self.settings_drawer = QFrame(parent_widget)
             self.settings_drawer.setObjectName("DrawerPanel")
+            self.settings_drawer.setAttribute(Qt.WA_StyledBackground, True)
             self.settings_drawer.setVisible(False)
-            d_eff = QGraphicsDropShadowEffect(self.settings_drawer)
-            d_eff.setBlurRadius(32)
-            d_eff.setOffset(-6, 0)
-            d_eff.setColor(QColor(15, 23, 42, 65))
-            self.settings_drawer.setGraphicsEffect(d_eff)
+
 
             d_lay = QVBoxLayout(self.settings_drawer)
             d_lay.setContentsMargins(0, 0, 0, 0)
@@ -2414,7 +2806,9 @@ if HAS_PYSIDE6:
             dh_lay.addWidget(lbl_dh)
             dh_lay.addStretch()
             btn_dc = QPushButton("✕")
-            btn_dc.setProperty("class", "SecondaryBtn")
+            btn_dc.setProperty("class", "WinBtn")
+            btn_dc.setFixedSize(30, 30)
+            btn_dc.setCursor(QCursor(Qt.PointingHandCursor))
             btn_dc.clicked.connect(self._close_overlays)
             dh_lay.addWidget(btn_dc)
             d_lay.addWidget(d_hdr)
@@ -2578,10 +2972,19 @@ if HAS_PYSIDE6:
             self._drawer_anim.start()
 
         def _render_tpl_cards(self):
+            self.tpl_scroll.setUpdatesEnabled(False)
+            try:
+                self._render_tpl_cards_inner()
+            finally:
+                self.tpl_scroll.setUpdatesEnabled(True)
+
+        def _render_tpl_cards_inner(self):
             while self.tpl_list_lay.count():
                 it = self.tpl_list_lay.takeAt(0)
-                if it.widget():
-                    it.widget().deleteLater()
+                w_old = it.widget()
+                if w_old is not None:
+                    w_old.setParent(None)
+                    w_old.deleteLater()
             t = THEMES.get(self.theme_name, THEMES["light"])
             self.tpl_list_widget.setStyleSheet("background: transparent;")
             for k, v in self.templates_cache.items():
@@ -2630,7 +3033,7 @@ if HAS_PYSIDE6:
         def _open_template_editor_from_popover(self):
             self._close_overlays()
             self._switch_mode("templates")
-            if hasattr(self, "template_editor"):
+            if getattr(self, "template_editor", None) is not None and not getattr(self.template_editor, "_dirty", False):
                 self.template_editor.load_templates(self.active_tpl)
 
         def _on_editor_template_saved(self, tpl_id: str):
@@ -2642,7 +3045,10 @@ if HAS_PYSIDE6:
         def _sync_template_ui(self):
             tpl = self.templates_cache.get(self.active_tpl, {})
             t_title = tpl.get("display_title", self.active_tpl)
-            self.btn_tpl_open.setText(f"Шаблон: {t_title} ▾")
+            if hasattr(self, "lbl_hdr_tpl_text"):
+                elided_t = self.lbl_hdr_tpl_text.fontMetrics().elidedText(f"Шаблон: {t_title}", Qt.ElideRight, 206)
+                self.lbl_hdr_tpl_text.setText(elided_t)
+            self.btn_tpl_open.setToolTip(f"Активный шаблон: {t_title}")
             cols = int(tpl.get("page", {}).get("columns", 1) or 1)
             if cols > 1 and not self.config.get("two_columns", False):
                 self._sync_two_col_actions(True)
@@ -2650,26 +3056,58 @@ if HAS_PYSIDE6:
             self._refresh_queue_table()
 
         def _setup_template_watcher(self):
+            self._last_tpl_sig = get_templates_signature()
             try:
                 self._tpl_watcher = QFileSystemWatcher(self)
-                dirs = [str(d) for d in get_templates_dirs() if d.exists()]
-                if dirs:
-                    self._tpl_watcher.addPaths(dirs)
+                self._refresh_watcher_paths()
                 self._tpl_reload_timer = QTimer(self)
                 self._tpl_reload_timer.setSingleShot(True)
-                self._tpl_reload_timer.setInterval(250)
-                self._tpl_reload_timer.timeout.connect(lambda: self.reload_templates(silent=True))
+                self._tpl_reload_timer.setInterval(200)
+                self._tpl_reload_timer.timeout.connect(self._check_templates_changed)
                 self._tpl_watcher.directoryChanged.connect(lambda _: self._tpl_reload_timer.start())
+                self._tpl_watcher.fileChanged.connect(lambda _: self._tpl_reload_timer.start())
             except Exception as ex:
                 log(f"Ошибка QFileSystemWatcher: {ex}")
 
+            # Надёжный лёгкий опрос (1.5 сек) на случай облачной синхронизации (Google Drive) или переименований
+            self._tpl_poll_timer = QTimer(self)
+            self._tpl_poll_timer.setInterval(1500)
+            self._tpl_poll_timer.timeout.connect(self._check_templates_changed)
+            self._tpl_poll_timer.start()
+
+        def _refresh_watcher_paths(self):
+            if not hasattr(self, "_tpl_watcher"):
+                return
+            try:
+                dirs = [str(d) for d in get_templates_dirs() if d.exists()]
+                files = [fp for fp, _, _ in get_templates_signature()]
+                cur_dirs = set(self._tpl_watcher.directories())
+                cur_files = set(self._tpl_watcher.files())
+                add_d = [d for d in dirs if d not in cur_dirs]
+                add_f = [f for f in files if f not in cur_files]
+                if add_d:
+                    self._tpl_watcher.addPaths(add_d)
+                if add_f:
+                    self._tpl_watcher.addPaths(add_f)
+            except Exception:
+                pass
+
+        def _check_templates_changed(self):
+            new_sig = get_templates_signature()
+            if new_sig != getattr(self, "_last_tpl_sig", None):
+                self._last_tpl_sig = new_sig
+                self._refresh_watcher_paths()
+                self.reload_templates(silent=True)
+
         def reload_templates(self, silent: bool = False):
+            self._last_tpl_sig = get_templates_signature()
+            self._refresh_watcher_paths()
             fresh = list_available_templates()
             self.templates_cache = {t["name"]: t for t in fresh}
             if self.active_tpl not in self.templates_cache and self.templates_cache:
                 self.active_tpl = next(iter(self.templates_cache))
             self._sync_template_ui()
-            if hasattr(self, "template_editor"):
+            if getattr(self, "template_editor", None) is not None:
                 self.template_editor.load_templates(self.active_tpl)
             if not silent:
                 self._toast(f"Найдено шаблонов: {len(self.templates_cache)}")
@@ -2706,8 +3144,8 @@ if HAS_PYSIDE6:
                 self.btn_tpl_open.setVisible(mode_id != "templates")
             if mode_id in ("files", "templates"):
                 self.reload_templates(silent=True)
-            if mode_id == "templates" and hasattr(self, "template_editor"):
-                self.template_editor.load_templates(self.active_tpl)
+            if mode_id == "templates":
+                self._ensure_template_editor().load_templates(self.active_tpl)
             self._update_footer_button()
 
         def _on_append_radio_changed(self):
@@ -2816,8 +3254,10 @@ if HAS_PYSIDE6:
 
         def _clear_editor(self):
             self.ed_input.clear()
+            self.ed_input.document().clearUndoRedoStacks()
             self.result_banner.setVisible(False)
             self._parse_preview()
+            gc.collect()
 
         def _pick_append_target(self):
             f, _ = QFileDialog.getOpenFileName(self, "Выберите целевой DOCX", "", "Word Documents (*.docx)")
@@ -2828,6 +3268,17 @@ if HAS_PYSIDE6:
 
         def _parse_preview(self):
             raw = self.ed_input.toPlainText()
+            cur_key = (raw, self.theme_name, self.active_tpl)
+            if getattr(self, "_last_preview_key", None) == cur_key:
+                return
+            self._last_preview_key = cur_key
+            self.preview_scroll.setUpdatesEnabled(False)
+            try:
+                self._parse_preview_inner(raw)
+            finally:
+                self.preview_scroll.setUpdatesEnabled(True)
+
+        def _parse_preview_inner(self, raw: str):
             self.lbl_char_count.setText(f"{len(raw)} симв.")
             st = analyze_markdown_text(raw)
             self.lbl_stat_sec.setText(f"{st['headings']} разд.")
@@ -2836,8 +3287,10 @@ if HAS_PYSIDE6:
 
             while self.outline_lay.count():
                 it = self.outline_lay.takeAt(0)
-                if it.widget():
-                    it.widget().deleteLater()
+                w_old = it.widget()
+                if w_old is not None:
+                    w_old.setParent(None)
+                    w_old.deleteLater()
 
             if not raw.strip():
                 lbl_e = QLabel("Введите или вставьте текст слева, чтобы увидеть структуру документа.")
@@ -2988,7 +3441,7 @@ if HAS_PYSIDE6:
                 self._start_batch_conversion()
             elif self.mode == "merge":
                 self._run_merge()
-            elif self.mode == "templates" and hasattr(self, "template_editor"):
+            elif self.mode == "templates" and getattr(self, "template_editor", None) is not None:
                 self.template_editor.save_current_template()
 
         def _open_last_file(self):
@@ -3100,7 +3553,17 @@ if HAS_PYSIDE6:
                 self.queue_items[idx]["template_name"] = tpl_id
                 self.queue_items[idx]["custom_tpl"] = True
                 t_name = self.templates_cache.get(tpl_id, {}).get("display_title", tpl_id)
-                self._refresh_queue_table()
+                cw = self.table_queue.cellWidget(idx, 4)
+                btn = cw.findChild(QPushButton, "TableTplBtn") if cw is not None else None
+                if btn is not None:
+                    btn.setToolTip(t_name)
+                    btn.setText(btn.fontMetrics().elidedText(f"{t_name} ▾", Qt.ElideRight, 196))
+                    m = btn.menu()
+                    if m is not None:
+                        for act in m.actions():
+                            act.setChecked(act.text() == t_name)
+                else:
+                    self._refresh_queue_table()
                 self._toast(f"{Path(self.queue_items[idx]['input_path']).name}: {t_name}")
 
         def _on_queue_context_menu(self, pos):
@@ -3129,6 +3592,7 @@ if HAS_PYSIDE6:
             menu.addSeparator()
             menu.addAction("Удалить из очереди").triggered.connect(lambda: self._remove_queue_row(row))
             menu.exec(self.table_queue.viewport().mapToGlobal(pos))
+            menu.deleteLater()
 
         def _toggle_row_selection(self, row: int):
             if 0 <= row < len(self.queue_items):
@@ -3145,6 +3609,19 @@ if HAS_PYSIDE6:
         def _refresh_queue_table(self):
             if not hasattr(self, "table_queue"):
                 return
+            self.table_queue.setUpdatesEnabled(False)
+            try:
+                self._refresh_queue_table_inner()
+            finally:
+                self.table_queue.setUpdatesEnabled(True)
+
+        def _refresh_queue_table_inner(self):
+            for old_r in range(self.table_queue.rowCount()):
+                for old_c in (0, 4, 6):
+                    cw = self.table_queue.cellWidget(old_r, old_c)
+                    if cw is not None:
+                        cw.setParent(None)
+                        cw.deleteLater()
             self.table_queue.setRowCount(0)
             tpl_items = [(tid, cfg.get("display_title", tid)) for tid, cfg in self.templates_cache.items()]
             for idx, item in enumerate(self.queue_items):
@@ -3177,11 +3654,14 @@ if HAS_PYSIDE6:
                 tpl_w = QWidget()
                 tpl_w.setStyleSheet("background: transparent;")
                 tl = QHBoxLayout(tpl_w)
-                tl.setContentsMargins(4, 6, 4, 6)
-                btn_row_tpl = QPushButton(f"{cur_lbl} ▾")
+                tl.setContentsMargins(4, 4, 4, 4)
+                btn_row_tpl = QPushButton()
                 btn_row_tpl.setObjectName("TableTplBtn")
                 btn_row_tpl.setAttribute(Qt.WA_StyledBackground, True)
-                btn_row_tpl.setMinimumHeight(30)
+                btn_row_tpl.setFixedHeight(32)
+                btn_row_tpl.setMaximumWidth(220)
+                btn_row_tpl.setToolTip(cur_lbl)
+                btn_row_tpl.setText(btn_row_tpl.fontMetrics().elidedText(f"{cur_lbl} ▾", Qt.ElideRight, 196))
                 btn_row_tpl.setCursor(QCursor(Qt.PointingHandCursor))
                 rm = QMenu(btn_row_tpl)
                 apply_menu_theme(rm, self.theme_name)
@@ -3220,7 +3700,7 @@ if HAS_PYSIDE6:
                     btn_op.setToolTip(f"Открыть документ: {out_p.name}")
                     btn_op.clicked.connect(lambda _, fp=out_p: self._open_path_in_os(fp))
                     al.addWidget(btn_op)
-                self.table_queue.setRowHeight(r, 52)
+                self.table_queue.setRowHeight(r, 54)
                 self.table_queue.setCellWidget(r, 6, act_w)
             self._update_footer_button()
 
@@ -3272,6 +3752,12 @@ if HAS_PYSIDE6:
 
         def _on_batch_done(self, ok_cnt: int, fail_cnt: int):
             self.btn_main_run.setEnabled(True)
+            if HAS_ENGINE:
+                try:
+                    latex_to_omml.cache_clear()
+                except Exception:
+                    pass
+            gc.collect()
             self._refresh_queue_table()
             if ok_cnt > 0 and self._last_output:
                 self.lbl_batch_result.setText(f"✓ Готово файлов: {ok_cnt} (ошибок: {fail_cnt}) — {self._last_output.name}")
@@ -3281,11 +3767,46 @@ if HAS_PYSIDE6:
             self._toast(f"Пакетная конвертация завершена ({ok_cnt} готово, {fail_cnt} ошибок)")
 
         # --- Merge / Restyle actions ---
+        def _sync_merge_list_ui(self):
+            self.list_merge.clear()
+            for i, fp in enumerate(self.merge_files, 1):
+                it = QListWidgetItem(f"{i}. {Path(fp).name}")
+                it.setData(Qt.UserRole, fp)
+                it.setToolTip(fp)
+                self.list_merge.addItem(it)
+
+        def _on_merge_rows_moved(self, *args):
+            reordered = []
+            for r in range(self.list_merge.count()):
+                fp = self.list_merge.item(r).data(Qt.UserRole)
+                if fp:
+                    reordered.append(fp)
+            if reordered:
+                self.merge_files = reordered
+                QTimer.singleShot(0, self._sync_merge_list_ui)
+                self._toast("Порядок документов обновлён")
+
+        def _on_merge_context_menu(self, pos):
+            menu = QMenu(self.list_merge)
+            apply_menu_theme(menu, self.theme_name)
+            row = self.list_merge.row(self.list_merge.itemAt(pos))
+            if row >= 0:
+                self.list_merge.setCurrentRow(row)
+                menu.addAction("Удалить выбранный").triggered.connect(self._merge_remove)
+                menu.addSeparator()
+            if self.merge_files:
+                menu.addAction("Очистить список").triggered.connect(self._merge_clear)
+            else:
+                menu.addAction("+ Добавить .docx").triggered.connect(self._merge_add)
+            menu.exec(self.list_merge.viewport().mapToGlobal(pos))
+            menu.deleteLater()
+
         def _merge_add(self):
             files, _ = QFileDialog.getOpenFileNames(self, "Выберите DOCX файлы", "", "Word Documents (*.docx)")
             for f in files:
                 self.merge_files.append(f)
-                self.list_merge.addItem(f"{len(self.merge_files)}. {Path(f).name}")
+            if files:
+                self._sync_merge_list_ui()
 
         def _merge_move(self, delta: int):
             r = self.list_merge.currentRow()
@@ -3375,8 +3896,10 @@ if HAS_PYSIDE6:
             self.hotkey_emitter.trigger_clipboard.connect(self.trigger_clipboard_convert)
             self.hotkey_emitter.trigger_main_window.connect(self.show_main_window)
 
+            self._exiting = False
             self._setup_tray()
             self._setup_hotkeys()
+            self.qapp.aboutToQuit.connect(self.cleanup_on_exit)
 
         def _setup_tray(self):
             self.tray_icon = QSystemTrayIcon(self.qapp)
@@ -3511,15 +4034,52 @@ if HAS_PYSIDE6:
             except Exception as e:
                 self.toast.show_toast(f"Ошибка сборки: {str(e)[:60]}", self.main_window.theme_name)
 
-        def exit_app(self):
+        def cleanup_on_exit(self):
+            if getattr(self, "_exiting", False):
+                return
+            self._exiting = True
             if sys.platform == "win32" and user32 is not None:
                 try:
                     user32.UnregisterHotKey(None, 101)
                     user32.UnregisterHotKey(None, 102)
                 except Exception:
                     pass
-            self.tray_icon.hide()
-            self.toast.hide()
+            if getattr(self, "_win_hotkey_filter", None) is not None:
+                try:
+                    self.qapp.removeNativeEventFilter(self._win_hotkey_filter)
+                except Exception:
+                    pass
+                self._win_hotkey_filter = None
+            if keyboard is not None:
+                try:
+                    keyboard.unhook_all()
+                except Exception:
+                    pass
+            try:
+                self.toast._hide_timer.stop()
+                self.toast.hide()
+                self.toast.deleteLater()
+            except Exception:
+                pass
+            try:
+                try:
+                    self.qapp.removeEventFilter(self.main_window)
+                except Exception:
+                    pass
+                self.main_window.cleanup()
+                self.main_window.deleteLater()
+            except Exception:
+                pass
+            try:
+                self.tray_icon.hide()
+                self.tray_icon.deleteLater()
+            except Exception:
+                pass
+            _SVG_ICON_CACHE.clear()
+            gc.collect()
+
+        def exit_app(self):
+            self.cleanup_on_exit()
             self.qapp.quit()
 
 else:

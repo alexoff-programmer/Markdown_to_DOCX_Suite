@@ -16,6 +16,7 @@ gost_docx_formatter.py — Движок генерации и оформлени
 from __future__ import annotations
 
 import copy
+from functools import lru_cache
 import os
 import re
 import shutil
@@ -788,6 +789,7 @@ class LaTeXToOMMLCompiler:
         return "".join(merged_xml)
 
 
+@lru_cache(maxsize=128)
 def latex_to_omml(latex_str: str, size_pt: Optional[float] = None, bold: bool = False) -> str:
     return LaTeXToOMMLCompiler(latex_str, size_pt=size_pt, bold=bold).compile()
 

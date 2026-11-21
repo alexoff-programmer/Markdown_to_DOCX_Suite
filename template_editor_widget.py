@@ -23,9 +23,15 @@ try:
         QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
         QCheckBox, QPushButton, QFrame, QScrollArea, QComboBox, QDoubleSpinBox,
         QSpinBox, QListWidget, QListWidgetItem, QStackedWidget, QPlainTextEdit,
-        QColorDialog, QMenu, QSizePolicy, QDialog
+        QColorDialog, QMenu, QWidgetAction, QSizePolicy, QDialog
     )
-    from PySide6.QtGui import QColor, QFont, QCursor, QAction
+    from PySide6.QtGui import QColor, QFont, QCursor, QAction, QIcon, QPixmap, QPainter
+    try:
+        from PySide6.QtSvg import QSvgRenderer
+        _HAS_SVG = True
+    except ImportError:
+        QSvgRenderer = None
+        _HAS_SVG = False
     from PySide6.QtCore import Qt, Signal
     HAS_PYSIDE6 = True
 except ImportError:
@@ -230,6 +236,8 @@ if HAS_PYSIDE6:
     class TemplateEditorWidget(QWidget):
         """Полноценный редактор шаблонов, органично встроенный в UnifiedMainWindow."""
         template_saved = Signal(str)
+        template_deleted = Signal(str)
+        refresh_requested = Signal()
         toast_requested = Signal(str)
 
         def __init__(
@@ -237,6 +245,7 @@ if HAS_PYSIDE6:
             templates_provider: Callable[[], Dict[str, dict]],
             primary_dir_provider: Callable[[], Path],
             register_path_fn: Callable[[Path], None],
+            unregister_path_fn: Optional[Callable[[Path], None]] = None,
             context_menu_installer: Optional[Callable[[QWidget], None]] = None,
             theme_getter: Optional[Callable[[], dict]] = None,
             parent=None,
@@ -245,6 +254,7 @@ if HAS_PYSIDE6:
             self._templates_provider = templates_provider
             self._primary_dir_provider = primary_dir_provider
             self._register_path_fn = register_path_fn
+            self._unregister_path_fn = unregister_path_fn
             self._install_ctx = context_menu_installer
             self._theme_getter = theme_getter
 
@@ -300,8 +310,10 @@ if HAS_PYSIDE6:
 
             self.btn_tpl_picker = QPushButton("Выберите шаблон ▾")
             self.btn_tpl_picker.setObjectName("TplPill")
+            self.btn_tpl_picker.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
             self.btn_tpl_picker.setMinimumHeight(34)
-            self.btn_tpl_picker.setMinimumWidth(240)
+            self.btn_tpl_picker.setMinimumWidth(200)
+            self.btn_tpl_picker.setMaximumWidth(270)
             self.btn_tpl_picker.setCursor(QCursor(Qt.PointingHandCursor))
             self.tpl_picker_menu = QMenu(self.btn_tpl_picker)
             self.btn_tpl_picker.setMenu(self.tpl_picker_menu)
@@ -328,6 +340,14 @@ if HAS_PYSIDE6:
             btn_dup.clicked.connect(self._duplicate_template)
             b_lay.addWidget(btn_dup)
 
+            btn_ref_tpl = QPushButton("↻")
+            btn_ref_tpl.setProperty("class", "IconBtn")
+            btn_ref_tpl.setFixedSize(32, 32)
+            btn_ref_tpl.setToolTip("Обновить список шаблонов из папки")
+            btn_ref_tpl.setCursor(QCursor(Qt.PointingHandCursor))
+            btn_ref_tpl.clicked.connect(self.refresh_requested.emit)
+            b_lay.addWidget(btn_ref_tpl)
+
             root.addWidget(bar)
 
             # Main Body: Left Navigation + Right Section Stack
@@ -338,7 +358,7 @@ if HAS_PYSIDE6:
             nav_card = QFrame()
             nav_card.setProperty("class", "PaneCard")
             nav_card.setAttribute(Qt.WA_StyledBackground, True)
-            nav_card.setFixedWidth(262)
+            nav_card.setFixedWidth(218)
             n_lay = QVBoxLayout(nav_card)
             n_lay.setContentsMargins(10, 12, 10, 12)
             n_lay.setSpacing(6)
@@ -365,28 +385,7 @@ if HAS_PYSIDE6:
                 n_lay.addWidget(sb)
                 self.nav_buttons.append(sb)
 
-            n_lay.addSpacing(8)
-            lbl_st_list = QLabel("Быстрый выбор стиля")
-            lbl_st_list.setStyleSheet("font-size: 12px; font-weight: 600; opacity: 0.7; padding: 2px 4px;")
-            n_lay.addWidget(lbl_st_list)
-
-            self.list_styles = QListWidget()
-            self.list_styles.currentItemChanged.connect(self._on_style_selected)
-            n_lay.addWidget(self.list_styles, 1)
-
-            st_btns = QHBoxLayout()
-            st_btns.setSpacing(6)
-            btn_add_st = QPushButton("+ Стиль")
-            btn_add_st.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-            btn_add_st.setProperty("class", "SecondaryBtn")
-            btn_add_st.clicked.connect(self._add_custom_style)
-            st_btns.addWidget(btn_add_st, 1)
-            btn_del_st = QPushButton("Удалить")
-            btn_del_st.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-            btn_del_st.setProperty("class", "SecondaryBtn")
-            btn_del_st.clicked.connect(self._delete_selected_style)
-            st_btns.addWidget(btn_del_st)
-            n_lay.addLayout(st_btns)
+            n_lay.addStretch()
 
             body.addWidget(nav_card)
 
@@ -544,10 +543,44 @@ if HAS_PYSIDE6:
 
         # --- Section 2: Style Editor + Live Preview ---
         def _build_style_section(self) -> QWidget:
+            outer = QWidget()
+            outer_lay = QHBoxLayout(outer)
+            outer_lay.setContentsMargins(14, 14, 14, 14)
+            outer_lay.setSpacing(14)
+
+            st_side = QWidget()
+            st_side.setFixedWidth(182)
+            ss_lay = QVBoxLayout(st_side)
+            ss_lay.setContentsMargins(0, 0, 0, 0)
+            ss_lay.setSpacing(8)
+            lbl_st_list = QLabel("Стили документа")
+            lbl_st_list.setStyleSheet("font-size: 12.5px; font-weight: 600; opacity: 0.75;")
+            ss_lay.addWidget(lbl_st_list)
+
+            self.list_styles = QListWidget()
+            self.list_styles.currentItemChanged.connect(self._on_style_selected)
+            ss_lay.addWidget(self.list_styles, 1)
+
+            st_btns = QHBoxLayout()
+            st_btns.setSpacing(6)
+            btn_add_st = QPushButton("+ Стиль")
+            btn_add_st.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            btn_add_st.setProperty("class", "SecondaryBtn")
+            btn_add_st.clicked.connect(self._add_custom_style)
+            st_btns.addWidget(btn_add_st, 1)
+            btn_del_st = QPushButton("Удалить")
+            btn_del_st.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            btn_del_st.setProperty("class", "SecondaryBtn")
+            btn_del_st.clicked.connect(self._delete_selected_style)
+            st_btns.addWidget(btn_del_st)
+            ss_lay.addLayout(st_btns)
+            outer_lay.addWidget(st_side)
+
             w = QWidget()
             lay = QVBoxLayout(w)
-            lay.setContentsMargins(18, 16, 18, 16)
+            lay.setContentsMargins(4, 2, 4, 2)
             lay.setSpacing(12)
+            outer_lay.addWidget(w, 1)
 
             hdr = QHBoxLayout()
             self.lbl_style_title = QLabel("Стиль: Основной текст")
@@ -637,8 +670,8 @@ if HAS_PYSIDE6:
                 sp.valueChanged.connect(self._on_style_prop_changed)
             lay.addLayout(g)
 
-            flags_row = QHBoxLayout()
-            flags_row.setSpacing(14)
+            flags_grid = QGridLayout()
+            flags_grid.setSpacing(8)
             self.chk_st_bold = QCheckBox("Полужирный")
             self.chk_st_italic = QCheckBox("Курсив")
             self.chk_st_caps = QCheckBox("ПРОПИСНЫЕ")
@@ -646,12 +679,15 @@ if HAS_PYSIDE6:
             self.chk_st_kwn = QCheckBox("Не отрывать от следующего")
             for c in (self.chk_st_bold, self.chk_st_italic, self.chk_st_caps, self.chk_st_pb, self.chk_st_kwn):
                 c.toggled.connect(self._on_style_prop_changed)
-                flags_row.addWidget(c)
-            flags_row.addStretch()
-            lay.addLayout(flags_row)
+            flags_grid.addWidget(self.chk_st_bold, 0, 0)
+            flags_grid.addWidget(self.chk_st_italic, 0, 1)
+            flags_grid.addWidget(self.chk_st_caps, 0, 2)
+            flags_grid.addWidget(self.chk_st_pb, 1, 0)
+            flags_grid.addWidget(self.chk_st_kwn, 1, 1, 1, 2)
+            lay.addLayout(flags_grid)
 
             lay.addStretch()
-            return w
+            return outer
 
         # --- Section 3: Tables ---
         def _build_tables_section(self) -> QWidget:
@@ -803,28 +839,87 @@ if HAS_PYSIDE6:
             if hasattr(self, "ed_st_color"):
                 self._sync_color_swatch(self.ed_st_color.text().strip() or "#000000")
 
+        def _make_trash_icon(self, color: str = "#64748B", size: int = 14) -> QIcon:
+            svg = (
+                f"<svg viewBox='0 0 24 24' fill='none' stroke='{color}' stroke-width='2' "
+                f"stroke-linecap='round' stroke-linejoin='round'>"
+                f"<polyline points='3 6 5 6 21 6'/>"
+                f"<path d='M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6'/>"
+                f"<path d='M10 11v6'/><path d='M14 11v6'/>"
+                f"<path d='M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2'/></svg>"
+            ).encode("utf-8")
+            scale = 4
+            pix = QPixmap(size * scale, size * scale)
+            pix.fill(Qt.transparent)
+            if _HAS_SVG and QSvgRenderer is not None:
+                ren = QSvgRenderer(svg)
+                pt = QPainter(pix)
+                pt.setRenderHint(QPainter.Antialiasing, True)
+                ren.render(pt)
+                pt.end()
+            else:
+                pix.loadFromData(svg, "SVG")
+            pix.setDevicePixelRatio(float(scale))
+            ic = QIcon()
+            ic.addPixmap(pix)
+            return ic
+
         def load_templates(self, active_tpl_id: str = ""):
             self._loading = True
             tpls = self._templates_provider()
             self.tpl_picker_menu.clear()
             target_tid = active_tpl_id if active_tpl_id in tpls else (next(iter(tpls)) if tpls else "")
+            t = self._t()
+            trash_ic = self._make_trash_icon(t["text_mute"], 14)
             for tid, cfg in tpls.items():
                 title = cfg.get("display_title", tid)
-                act = self.tpl_picker_menu.addAction(title)
-                act.setCheckable(True)
-                act.setChecked(tid == target_tid)
-                act.triggered.connect(lambda _, t_id=tid: self._on_tpl_picked(t_id))
+                is_cur = (tid == target_tid)
+                wa = QWidgetAction(self.tpl_picker_menu)
+                row_w = QWidget()
+                row_w.setStyleSheet("background: transparent;")
+                rl = QHBoxLayout(row_w)
+                rl.setContentsMargins(4, 2, 4, 2)
+                rl.setSpacing(6)
+                b_sel = QPushButton(("✓  " if is_cur else "    ") + title)
+                b_sel.setCursor(QCursor(Qt.PointingHandCursor))
+                b_sel.setMinimumHeight(28)
+                fg = t["accent_text"] if is_cur else t["text"]
+                bg = t["accent_soft"] if is_cur else "transparent"
+                b_sel.setStyleSheet(
+                    f"QPushButton {{ text-align: left; padding: 4px 10px; border: none; border-radius: 6px; "
+                    f"background-color: {bg}; color: {fg}; font-size: 13px; font-weight: {'600' if is_cur else '400'}; }}"
+                    f"QPushButton:hover {{ background-color: {t['accent_soft']}; color: {t['accent_text']}; }}"
+                )
+                b_sel.clicked.connect(lambda _, t_id=tid: (self.tpl_picker_menu.close(), self._on_tpl_picked(t_id)))
+                rl.addWidget(b_sel, 1)
+                if len(tpls) > 1:
+                    b_del = QPushButton("")
+                    b_del.setIcon(trash_ic)
+                    b_del.setFixedSize(26, 26)
+                    b_del.setToolTip(f"Удалить шаблон «{title}»")
+                    b_del.setCursor(QCursor(Qt.PointingHandCursor))
+                    b_del.setStyleSheet(
+                        f"QPushButton {{ border: none; border-radius: 6px; background: transparent; }}"
+                        f"QPushButton:hover {{ background-color: rgba(239, 68, 68, 0.16); }}"
+                    )
+                    b_del.clicked.connect(lambda _, t_id=tid: (self.tpl_picker_menu.close(), self._delete_template_by_id(t_id)))
+                    rl.addWidget(b_del, 0)
+                wa.setDefaultWidget(row_w)
+                self.tpl_picker_menu.addAction(wa)
             if target_tid and target_tid in tpls:
-                self.btn_tpl_picker.setText(f"{tpls[target_tid].get('display_title', target_tid)} ▾")
+                _t_lbl = tpls[target_tid].get('display_title', target_tid)
+                self.btn_tpl_picker.setToolTip(_t_lbl)
+                self.btn_tpl_picker.setText(self.btn_tpl_picker.fontMetrics().elidedText(f"{_t_lbl} ▾", Qt.ElideRight, 244))
                 self._load_template_data(target_tid, tpls[target_tid])
             self._loading = False
 
         def _on_tpl_picked(self, tid: str):
             tpls = self._templates_provider()
             if tid and tid in tpls:
-                self.btn_tpl_picker.setText(f"{tpls[tid].get('display_title', tid)} ▾")
-                for act, (k, _) in zip(self.tpl_picker_menu.actions(), tpls.items()):
-                    act.setChecked(k == tid)
+                _t_lbl = tpls[tid].get('display_title', tid)
+                self.btn_tpl_picker.setToolTip(_t_lbl)
+                self.btn_tpl_picker.setText(self.btn_tpl_picker.fontMetrics().elidedText(f"{_t_lbl} ▾", Qt.ElideRight, 244))
+                self.load_templates(tid)
                 self._load_template_data(tid, tpls[tid])
 
         def _load_template_data(self, tid: str, cfg: dict):
@@ -1153,10 +1248,10 @@ if HAS_PYSIDE6:
             row.addWidget(b_cancel)
             row.addWidget(b_ok)
             lay.addLayout(row)
-            if dlg.exec() == QDialog.Accepted:
-                val = ed.text().strip()
-                return val or None
-            return None
+            ok = dlg.exec() == QDialog.Accepted
+            val = ed.text().strip() if ok else None
+            dlg.deleteLater()
+            return val or None
 
         def _create_new_template(self):
             title = self._ask_name_dialog("Новый шаблон", "Название нового шаблона:", "Мой шаблон ГОСТ")
@@ -1197,6 +1292,66 @@ if HAS_PYSIDE6:
             self._populate_style_list(select_key=name)
             self._switch_section(2)
             self.toast_requested.emit(f"Добавлен стиль: {name}")
+
+        def _confirm_dialog(self, title: str, message: str) -> bool:
+            dlg = QDialog(self)
+            dlg.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+            dlg.setAttribute(Qt.WA_TranslucentBackground, True)
+            dlg.setMinimumWidth(360)
+            t = self._t()
+            outer = QVBoxLayout(dlg)
+            outer.setContentsMargins(12, 12, 12, 12)
+            box = QFrame()
+            box.setAttribute(Qt.WA_StyledBackground, True)
+            box.setStyleSheet(
+                f"QFrame {{ background-color: {t['bg_window']}; border: 1px solid {t['border_strong']}; border-radius: 14px; }}"
+            )
+            outer.addWidget(box)
+            lay = QVBoxLayout(box)
+            lay.setContentsMargins(18, 16, 18, 16)
+            lay.setSpacing(10)
+            lbl_t = QLabel(title)
+            lbl_t.setStyleSheet(f"color: {t['text']}; font-size: 14px; font-weight: 700; border: none; background: transparent;")
+            lay.addWidget(lbl_t)
+            lbl_m = QLabel(message)
+            lbl_m.setWordWrap(True)
+            lbl_m.setStyleSheet(f"color: {t['text_2']}; font-size: 13px; border: none; background: transparent;")
+            lay.addWidget(lbl_m)
+            row = QHBoxLayout()
+            row.addStretch()
+            b_no = QPushButton("Отмена")
+            b_no.setProperty("class", "SecondaryBtn")
+            b_no.clicked.connect(dlg.reject)
+            b_yes = QPushButton("Удалить")
+            b_yes.setProperty("class", "PrimaryBtn")
+            b_yes.clicked.connect(dlg.accept)
+            row.addWidget(b_no)
+            row.addWidget(b_yes)
+            lay.addLayout(row)
+            ok = dlg.exec() == QDialog.Accepted
+            dlg.deleteLater()
+            return ok
+
+        def _delete_template_by_id(self, tid: str):
+            tpls = self._templates_provider()
+            if len(tpls) <= 1:
+                self.toast_requested.emit("Нельзя удалить единственный шаблон")
+                return
+            cfg = tpls.get(tid, {})
+            title = cfg.get("display_title", tid)
+            if not self._confirm_dialog("Удаление шаблона", f"Удалить шаблон «{title}» из папки шаблонов?"):
+                return
+            fpath_str = cfg.get("_file_path")
+            target = Path(fpath_str) if fpath_str else (self._primary_dir_provider() / f"{tid}.json")
+            try:
+                if target.exists():
+                    target.unlink()
+                if self._unregister_path_fn:
+                    self._unregister_path_fn(target)
+                self.template_deleted.emit(tid)
+                self.toast_requested.emit(f"Шаблон удалён: {title}")
+            except Exception as ex:
+                self.toast_requested.emit(f"Ошибка удаления: {str(ex)[:50]}")
 
         def _delete_selected_style(self):
             if not self._current_style_key:
