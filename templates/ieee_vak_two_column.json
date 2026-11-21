@@ -1,0 +1,246 @@
+{
+    "name": "ieee_vak_two_column",
+    "display_title": "IEEE / ВАК (Двухколоночный сборник)",
+    "description": "Двухколоночная верстка для конференционных сборников (IEEE, РИНЦ, ВАК) с автоматическим переключением в 1 колонку для Заголовка 1 и широких таблиц, особой первой страницей и открытыми таблицами.",
+    "specs_summary": "2 колонки (5 мм) • Первая страница без колонтитулов • Открытые таблицы (10 pt) • Формулы с табуляцией",
+    "tags": [
+        "IEEE",
+        "ВАК",
+        "РИНЦ",
+        "2 колонки",
+        "Сборник"
+    ],
+    "page": {
+        "width_mm": 210.0,
+        "height_mm": 297.0,
+        "margin_left_mm": 20.0,
+        "margin_right_mm": 20.0,
+        "margin_top_mm": 20.0,
+        "margin_bottom_mm": 20.0,
+        "columns": 2,
+        "column_spacing_mm": 5.0,
+        "span_headings": true,
+        "different_first_page": true,
+        "page_numbers": true
+    },
+    "tables": {
+        "border_style": "gost_open",
+        "header_double_border": true,
+        "header_shading": "F2F4F8",
+        "cell_padding_mm": {
+            "top": 0.9,
+            "bottom": 0.9,
+            "left": 1.5,
+            "right": 1.5
+        },
+        "repeat_header": true,
+        "cant_split": true
+    },
+    "diagrams": {
+        "dpi": 300
+    },
+    "fonts": {
+        "primary": {
+            "name": "Times New Roman",
+            "ascii": "Times New Roman",
+            "hAnsi": "Times New Roman",
+            "cs": "Times New Roman",
+            "eastAsia": "Times New Roman"
+        },
+        "monospace": {
+            "name": "Courier New",
+            "ascii": "Courier New",
+            "hAnsi": "Courier New",
+            "cs": "Courier New",
+            "eastAsia": "Courier New"
+        }
+    },
+    "structural_titles": [
+        "аннотация",
+        "abstract",
+        "введение",
+        "заключение",
+        "список использованных источников",
+        "список литературы",
+        "references"
+    ],
+    "styles": {
+        "Заголовок структурный": {
+            "font": "primary",
+            "size_pt": 14.0,
+            "bold": true,
+            "alignment": "center",
+            "line_spacing": 1.0,
+            "first_line_indent_mm": 0.0,
+            "space_before_pt": 10.0,
+            "space_after_pt": 8.0,
+            "page_break_before": false,
+            "keep_with_next": true,
+            "outline_level": 0
+        },
+        "Заголовок 1": {
+            "font": "primary",
+            "size_pt": 13.0,
+            "bold": true,
+            "alignment": "center",
+            "line_spacing": 1.0,
+            "first_line_indent_mm": 0.0,
+            "space_before_pt": 10.0,
+            "space_after_pt": 6.0,
+            "page_break_before": false,
+            "keep_with_next": true,
+            "outline_level": 0
+        },
+        "Заголовок 2": {
+            "font": "primary",
+            "size_pt": 11.0,
+            "bold": true,
+            "alignment": "left",
+            "line_spacing": 1.0,
+            "first_line_indent_mm": 0.0,
+            "space_before_pt": 8.0,
+            "space_after_pt": 4.0,
+            "page_break_before": false,
+            "keep_with_next": true,
+            "outline_level": 1
+        },
+        "Заголовок 3": {
+            "font": "primary",
+            "size_pt": 10.5,
+            "bold": true,
+            "italic": true,
+            "alignment": "left",
+            "line_spacing": 1.0,
+            "first_line_indent_mm": 5.0,
+            "space_before_pt": 6.0,
+            "space_after_pt": 3.0,
+            "page_break_before": false,
+            "keep_with_next": true,
+            "outline_level": 2
+        },
+        "Основной текст": {
+            "font": "primary",
+            "size_pt": 10.5,
+            "bold": false,
+            "alignment": "justify",
+            "line_spacing": 1.15,
+            "first_line_indent_mm": 5.0,
+            "space_before_pt": 0.0,
+            "space_after_pt": 0.0
+        },
+        "Примечание": {
+            "font": "primary",
+            "size_pt": 9.5,
+            "bold": false,
+            "alignment": "justify",
+            "line_spacing": 1.05,
+            "first_line_indent_mm": 5.0,
+            "space_before_pt": 3.0,
+            "space_after_pt": 3.0
+        },
+        "Цитата": {
+            "font": "primary",
+            "size_pt": 10.0,
+            "bold": false,
+            "italic": true,
+            "alignment": "justify",
+            "line_spacing": 1.05,
+            "first_line_indent_mm": 0.0,
+            "space_before_pt": 4.0,
+            "space_after_pt": 4.0
+        },
+        "Эпиграф": {
+            "font": "primary",
+            "size_pt": 9.5,
+            "bold": false,
+            "italic": true,
+            "alignment": "right",
+            "line_spacing": 1.05,
+            "first_line_indent_mm": 0.0,
+            "space_before_pt": 6.0,
+            "space_after_pt": 6.0
+        },
+        "Название таблицы": {
+            "font": "primary",
+            "size_pt": 10.0,
+            "bold": false,
+            "alignment": "left",
+            "line_spacing": 1.0,
+            "first_line_indent_mm": 0.0,
+            "space_before_pt": 6.0,
+            "space_after_pt": 3.0,
+            "keep_with_next": true
+        },
+        "Ячейка таблицы": {
+            "font": "primary",
+            "size_pt": 10.0,
+            "bold": false,
+            "alignment": "left",
+            "line_spacing": 1.0,
+            "first_line_indent_mm": 0.0,
+            "space_before_pt": 1.5,
+            "space_after_pt": 1.5
+        },
+        "Рисунок": {
+            "font": "primary",
+            "size_pt": 10.5,
+            "bold": false,
+            "alignment": "center",
+            "line_spacing": 1.0,
+            "first_line_indent_mm": 0.0,
+            "space_before_pt": 6.0,
+            "space_after_pt": 3.0,
+            "keep_with_next": true
+        },
+        "Подпись рисунка": {
+            "font": "primary",
+            "size_pt": 10.0,
+            "bold": false,
+            "alignment": "center",
+            "line_spacing": 1.0,
+            "first_line_indent_mm": 0.0,
+            "space_before_pt": 3.0,
+            "space_after_pt": 6.0
+        },
+        "Исходный код": {
+            "font": "monospace",
+            "size_pt": 8.5,
+            "bold": false,
+            "alignment": "left",
+            "line_spacing": 1.0,
+            "first_line_indent_mm": 0.0,
+            "space_before_pt": 0.0,
+            "space_after_pt": 0.0
+        },
+        "Название листинга": {
+            "font": "primary",
+            "size_pt": 10.0,
+            "bold": false,
+            "alignment": "left",
+            "line_spacing": 1.0,
+            "first_line_indent_mm": 0.0,
+            "space_before_pt": 6.0,
+            "space_after_pt": 3.0,
+            "keep_with_next": true
+        }
+    },
+    "lists": {
+        "base_indent_mm": 5.0,
+        "level_step_mm": 4.5,
+        "hanging_indent_mm": {
+            "dash": 4.0,
+            "bullet": 4.0,
+            "ordered": 5.5,
+            "task": 4.5
+        },
+        "dash_symbol": "–",
+        "bullet_symbols": [
+            "•",
+            "◦",
+            "▪"
+        ],
+        "marker_separator": " ",
+        "space_before_pt": 0.0,
+        "space_after_pt": 0.0
+    }
+}
